@@ -35,7 +35,6 @@ import warnings
 import pickle
 import tempfile
 import contextlib
-import itertools
 import math
 import random
 import re
@@ -998,7 +997,7 @@ def fansi(
     *,
     per_line=True,
     reset=True,
-    truecolor=None,
+    truecolor=False,
     link=None
 ):
     """
@@ -1006,7 +1005,7 @@ def fansi(
     Uses ANSI formatting to give the terminal styled color outputs.
 
     The 'per_line' option applies fansi to each line separately, which is useful for multi-line strings. It is enabled by default.
-    The 'truecolor' option enables 24-bit truecolor support if the terminal supports it. By default, it is False, unless your Pterm is set to display Truecolor.
+    The 'truecolor' option enables 24-bit truecolor support if the terminal supports it. It is disabled by default.
     The 'underline_color' option allows specifying a color for underlines independent of the text color. It is None by default.
     The 'link' option creates a hyperlink to the provided URL. It is None by default.
     Note on terminal hyperlink support:
@@ -1141,10 +1140,6 @@ def fansi(
         ... print(fansi("\tGitHub Repository", "magenta", "bold", link="https://github.com"))
         ... print("Note: In Wezterm, use Ctrl+click on links. In Alacritty, hyperlinks may need configuration.")
     """
-
-    if truecolor is None and 'pyin' in globals() and hasattr(pyin, 'true_color'):
-        #If not specified, grab the truecolor value from pseudo-terminal
-        truecolor = pyin.true_color
 
     if isinstance(text_color, str) and style is None and background_color is None:
         text_color, style, background_color = _transform_fansi_arg(text_color)
@@ -1410,7 +1405,6 @@ def fansi_print(
     background_color: object = None,
     underline_color=None,
     *,
-    link=None,
     new_line=True,
     reset=True,
     truecolor=True
@@ -1431,15 +1425,10 @@ def fansi_print(
             reset=reset,
             truecolor=truecolor,
             underline_color=underline_color,
-            link=link,
         ),
         end="\n" if new_line else "",
         flush=True,
     )
-
-def fansi_printed(x, *args, **kwargs):
-    fansi_print(x, *args, **kwargs)
-    return x
 
 # noinspection PyShadowingBuiltins
 def print_fansi_reference_table() -> None:
@@ -2211,11 +2200,11 @@ def uniform_float_color_image(height:int,width:int,color:tuple=(0,0,0,0)):
     assert is_number(color) or is_color(color) and len(color) in {3,4}, 'Color should be a number, an RGB float color, or an RGBA float color'
     
     if is_number(color):
-        output = np.ones((height,width),dtype=_float_image_dtype())*color
+        output = np.ones((height,width),dtype=float)*color
         assert is_grayscale_image(output)
         return output
     else:
-        output = np.ones((height,width,len(color)),dtype=_float_image_dtype())*as_numpy_array([[[*color]]])
+        output = np.ones((height,width,len(color)),dtype=float)*as_numpy_array([[[*color]]])
         assert len(color)==3 and is_rgb_image(output) or len(color)==4 and is_rgba_image(output)
         return output
 
@@ -2440,101 +2429,6 @@ def overlay_images(*images,mode='normal'):
         output=blend_images(output,image,mode=mode)
     return output
     
-def laplacian_blend(bot, top, alpha, levels=None):
-    """
-    Uses laplacian pyramid blending on two images with a given alpha mask.
-    Note: Right now only RGB images of equal dimensions are supported (non-rgb will be converted to RGB)
-    
-    Arguments:
-        - levels (int, None): The number of laplacian pyramid levels. Defaults to None, where the max number of levels is selected automatically from the image sizes. No errors will be thrown if you input a level number too high - it will effectively just use the max level.
-    
-    EXAMPLE:
-        >>> top_url = "https://fastly.picsum.photos/id/9/5000/3269.jpg?hmac=cZKbaLeduq7rNB8X-bigYO8bvPIWtT-mh8GRXtU3vPc"
-        ... bot_url = "https://fastly.picsum.photos/id/21/3008/2008.jpg?hmac=T8DSVNvP-QldCew7WD4jj_S3mWwxZPqdF0CNPksSko4"
-        ... 
-        ... S = 512
-        ... alpha = get_checkerboard_image(S, S, tile_size=64,first_color=0,second_color=1)
-        ... 
-        ... bot, top = resize_images_to_fit(crop_images_to_square(load_images(download_urls_to_cache(bot_url, top_url), use_cache=True)), height=S, width=S)
-        ... 
-        ... bot, top, alpha = as_float_images(as_rgb_images([bot, top, alpha]))
-        ... 
-        ... ic("FOR DEBUGGING", alpha.shape, alpha.dtype, bot.shape, bot.dtype, top.shape, top.dtype)
-        ... 
-        ... regular_blended_image = blend_images(bot, top, alpha)
-        ... laplacian_blended_image = laplacian_blend(bot, top, alpha)
-        ... 
-        ... laplacian_levels_anim = [laplacian_blend(bot, top, alpha,levels) for levels in range(10)]
-        ... 
-        ... display_image(grid_concatenated_images([[bot, top, alpha], [regular_blended_image, laplacian_blended_image]]), block=True)
-        ... display_image_slideshow(video_with_progress_bar(laplacian_levels_anim))
-    """
-    pip_import('cv2')
-    pip_import('numpy')
-
-    import numpy as np
-    import cv2
-
-    #Make all inputs RGB float images
-    bot, top, alpha = as_rgb_images(as_float_images([bot, top, alpha], copy=False), copy=False)
-
-    #Input validation: Make sure all images have same shape
-    if not (bot.shape == top.shape == alpha.shape):
-        raise ValueError(
-            "laplacian_blend: All input images must have same dimensions, but got bot.shape==%s and top.shape==%s and alpha.shape==%s" % 
-            (bot.shape, top.shape, alpha.shape)
-        )
-
-    # Calculate max possible levels if None is provided
-    if levels is None:
-        min_dim = min(bot.shape[:2] + top.shape[:2] + alpha.shape[:2])
-        levels = int(np.ceil(np.log2(min_dim)))
-
-    # Generate Gaussian pyramids
-    gaussian_pyr1 = [bot]
-    gaussian_pyr2 = [top]
-    gaussian_alpha = [alpha]
-
-    for _ in range(levels):
-        gaussian_pyr1.append(cv2.pyrDown(gaussian_pyr1[-1]))
-        gaussian_pyr2.append(cv2.pyrDown(gaussian_pyr2[-1]))
-        gaussian_alpha.append(cv2.pyrDown(gaussian_alpha[-1]))
-
-    # Generate Laplacian pyramids directly
-    laplacian_pyr1 = []
-    laplacian_pyr2 = []
-
-    for i in range(levels):
-        src_img1 = gaussian_pyr1[i + 1]
-        src_img2 = gaussian_pyr2[i + 1]
-
-        dst_size1 = (gaussian_pyr1[i].shape[1], gaussian_pyr1[i].shape[0])
-        dst_size2 = (gaussian_pyr2[i].shape[1], gaussian_pyr2[i].shape[0])
-        
-        level_expanded1 = cv2.pyrUp(src_img1, dstsize=dst_size1)
-        level_expanded2 = cv2.pyrUp(src_img2, dstsize=dst_size2)
-
-        laplacian_pyr1.append(cv2.subtract(gaussian_pyr1[i], level_expanded1))
-        laplacian_pyr2.append(cv2.subtract(gaussian_pyr2[i], level_expanded2))
-
-    # Add the smallest level directly (Gaussian level)
-    laplacian_pyr1.append(gaussian_pyr1[-1])
-    laplacian_pyr2.append(gaussian_pyr2[-1])
-
-    # Blend pyramids
-    blended_pyramid = []
-    for lap1, lap2, alpha_mask in zip(laplacian_pyr1, laplacian_pyr2, gaussian_alpha):
-        blended = lap1 * alpha_mask + lap2 * (1 - alpha_mask)
-        blended_pyramid.append(blended)
-
-    # Reconstruct the blended image
-    blended_image = blended_pyramid[-1]
-    for level in reversed(blended_pyramid[:-1]):
-        blended_image = cv2.pyrUp(blended_image, dstsize=(level.shape[1], level.shape[0]))
-        blended_image = cv2.add(blended_image, level)
-
-    return blended_image
-
 def get_checkerboard_image(height=64,
                            width=64,
                            *,
@@ -4554,122 +4448,6 @@ def temporary_numpy_random_seed(seed=None):
     finally:
         np.random.set_state(old_state)
 
-
-@contextlib.contextmanager
-def temporary_torch_random_seed(seed=None):
-    """
-    A context manager that sets PyTorch's random seed for the duration of the context block.
-    If no seed is provided, it does not change the random state.
-    
-    Parameters:
-        seed (int, optional): The seed value to use for generating random numbers.
-                              If None, the random state is not altered.
-    
-    Example:
-        >>> import torch
-        >>> torch.manual_seed(42)
-        >>> print("First random tensor:", torch.rand(2, 2))
-        >>> with temporary_torch_random_seed(seed=99):
-        ...     print("Random tensor in context:", torch.rand(2, 2))
-        >>> print("Second random tensor:", torch.rand(2, 2))
-        
-        >>> # Note how the above acts the same as if there was no context...
-        >>> torch.manual_seed(42)
-        >>> print("First random tensor:", torch.rand(2, 2))
-        >>> print("Second random tensor:", torch.rand(2, 2))
-        
-        OUTPUT:
-            First random tensor     : tensor([[0.8823, 0.9150], [0.3829, 0.9593]])
-            Random tensor in context: tensor([[0.1033, 0.9702], [0.9481, 0.9787]])
-            Second random tensor    : tensor([[0.3904, 0.6009], [0.2566, 0.7936]])
-            First random tensor     : tensor([[0.8823, 0.9150], [0.3829, 0.9593]])
-            Second random tensor    : tensor([[0.3904, 0.6009], [0.2566, 0.7936]])
-    
-    #WRITTEN BY CLAUDE - MAY 18 - DID NOT TEST EVERYTHING YET (i.e. multi-gpu cuda stress testing)
-    """
-    import torch
-    old_rng_state = torch.get_rng_state()
-    old_cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
-    old_deterministic = torch.backends.cudnn.deterministic
-    
-    try:
-        if seed is not None:
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-                torch.backends.cudnn.deterministic = True
-        yield
-    finally:
-        torch.set_rng_state(old_rng_state)
-        if old_cuda_rng_state is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state(old_cuda_rng_state)
-        torch.backends.cudnn.deterministic = old_deterministic
-        
-def seed_all(seed=None):
-    """
-    Set random seeds for Python's random, NumPy, and PyTorch.
-    
-    Parameters:
-        seed (int, optional): The seed value to use for all random number generators.
-                              If None, does not set any seeds.
-    
-    Example:
-        >>> seed_all(42)  # Sets all random seeds to 42
-        >>> import random, numpy as np, torch
-        >>> print(random.random(), np.random.rand(), torch.rand(1))
-    """
-    if seed is not None:
-
-        # Standard library random
-        import random
-        random.seed(seed)
-        
-        # NumPy
-        try:
-            import numpy as np
-            np.random.seed(seed)
-        except ImportError:
-            pass
-        
-        # PyTorch
-        try:
-            import torch
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-            torch.backends.cudnn.deterministic = True
-        except ImportError:
-            pass
-        
-
-@contextlib.contextmanager
-def temporary_seed_all(seed=None):
-    """
-    A context manager that sets all random seeds (Python random, NumPy, and PyTorch)
-    for the duration of the context block by combining all other temporary seed context managers.
-    If no seed is provided, it does not change any random states.
-    
-    Parameters:
-        seed (int, optional): The seed value to use for all random number generators.
-                              If None, the random states are not altered.
-    """
-
-    contexts = [temporary_random_seed(seed=seed)]
-    
-    try:
-        import numpy
-        contexts+=[temporary_numpy_random_seed(seed=seed)]
-    except ImportError:
-        pass
-    
-    try:
-        import torch
-        contexts+=[temporary_torch_random_seed(seed=seed)]
-    except ImportError:
-        pass
-
-    with contexts:
-        yield
 
 # endregion
 # region rant/ranp: ［run_as_new_thread，run_as_new_process］
@@ -6855,73 +6633,6 @@ def wav_to_mp3(wav_file_path: str, mp3_output_path: str = None, samplerate: int 
     subprocess.run(cmd, check=True)
     return mp3_output_path
 
-def convert_audio_file(input_file, output_file, *, skip_existing=False):
-    """
-    Convert an audio file to a different format using FFmpeg.
-
-    Args:
-        input_file (str): Path to the input audio file.
-        output_file (str): Desired output format or path. If only extension is provided
-                          (e.g., 'mp3', 'wav'), output will use input filename with new extension.
-                          Supported formats: wav, mp3, ogg, mp4.
-
-    Returns:
-        str: Path to the converted audio file.
-
-    Raises:
-        RuntimeError: If FFmpeg encounters an error or is not installed.
-        FileNotFoundError: If the input file does not exist or output file could not be created.
-
-    Notes:
-        - Requires FFmpeg to be installed and available in PATH.
-        - Automatically creates a unique filename if output path already exists.
-    
-    EXAMPLE:
-        >>> convert_audio_file('/Users/ryan/Downloads/Diffusion Illusions: SIGGRAPH 2024 Talk.mp4','wav')
-        ans = /Users/ryan/Downloads/Diffusion Illusions: SIGGRAPH 2024 Talk_copy.wav
-    """
-    import subprocess
-    import os
-
-    if not os.path.exists(input_file):
-        raise FileNotFoundError("Input file not found: "+input_file)
-        
-    _ensure_ffmpeg_installed()
-
-    supported_output_filetypes = "wav ogg mp3 mp4".split()
-
-    if output_file in supported_output_filetypes or "." + output_file in supported_output_filetypes:
-        output_file = rp.with_file_extension(input_file, output_file, replace=True)
-
-        if output_file==input_file:
-            #Converting a file to its own type...take a shortcut and just return the original file!
-            return input_file
-
-        output_file = rp.get_unique_copy_path(output_file)
-
-    if os.path.exists(output_file) and skip_existing:
-        return output_file
-
-    make_parent_directory(output_file)
-
-    try:
-        subprocess.run(
-            ["ffmpeg", "-i", input_file, "-y", output_file],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError("Error converting audio file: " + e.stderr.decode()) from e
-    except FileNotFoundError:
-        raise RuntimeError("FFmpeg not found. Please install FFmpeg to convert audio files.")
-
-    if not os.path.exists(output_file):
-        raise FileNotFoundError("Failed to create output file: " + output_file)
-
-    return output_file
-
-
 # endregionx
 # region  Matplotlib: ［display_image，brutish_display_image，display_color_255，display_grayscale_image，line_graph，block，clf］
 
@@ -7502,7 +7213,7 @@ def display_image(image,block=False):
             if ndim==2:
                 image=grayscale_to_rgb(image)
             if image.dtype==bool:
-                image=image.astype(_float_image_dtype())
+                image=image.astype(float)
             return cv_imshow(image,wait=10 if not block else 1000000)#Hit esc in the image to exit it
 
 def with_alpha_checkerboard(image, *, tile_size=8, first_color=1.0, second_color=0.75):
@@ -9757,7 +9468,7 @@ def globalize_locals(func):
     Useful for making reusable cells in a Jupyter notebook.
     
     When a function decorated with @globalize_locals is called, all local variables created
-    within the function become available in the global namespace during execution
+    within the function become available in the global namespace after execution.
     This includes both function parameters and local variables.
     
     The global namespace modification is the primary feature of this decorator,
@@ -9846,25 +9557,54 @@ def globalize_locals(func):
         caller_frame = sys._getframe(1)
         caller_globals = caller_frame.f_globals
         
+        # Create a dictionary to store function's locals
+        func_locals = {}
+        
         # First, bind the arguments to parameter names to ensure parameters are captured
         sig = inspect.signature(func)
         bound_args = sig.bind(*args, **kwargs)
         bound_args.apply_defaults()
+        func_locals.update(bound_args.arguments)
         
-        def trace_func(frame, event, arg):            # Set up trace function to capture variables on each line
-            if frame.f_code == func.__code__:         # We're only interested in the function we're decorating
-                caller_globals.update(frame.f_locals) # Push all local variables to globals
-                return trace_func                     # Keep tracing this function
-            return None                               # Don't trace other functions
+        # Set up trace function to capture variables on each line
+        def trace_func(frame, event, arg):
+            # We're only interested in the function we're decorating
+            if frame.f_code == func.__code__:
+                # Copy all variables from the frame's locals to our dictionary
+                for var_name, value in frame.f_locals.items():
+                    func_locals[var_name] = value
+                # Keep tracing this function
+                return trace_func
+            # Don't trace other functions
+            return None
             
         # Set tracing and execute the function
         original_trace = sys.gettrace()
         sys.settrace(trace_func)
         
-        try:     return func(*args, **kwargs) # Call the function and get its result
-        finally: sys.settrace(original_trace) # Restore the original trace function
+        try:
+            # Call the function and get its result
+            result = func(*args, **kwargs)
+            return result
+        except Exception:
+            # Capture the exception info
+            exc_info = sys.exc_info()
+            # Will re-raise after transferring variables
+            raise_later = True
+        finally:
+            # Restore the original trace function
+            sys.settrace(original_trace)
             
+            # Copy the captured locals to the caller's globals
+            for name, value in func_locals.items():
+                caller_globals[name] = value
+                
+            # If there was an exception, re-raise it
+            if 'raise_later' in locals() and raise_later:
+                raise exc_info[1].with_traceback(exc_info[2])
+    
     return wrapper
+
 
 def _filter_dict_via_fzf(input_dict,*,preview=None):
     """Uses fzf to select a subset of a dict and returns that dict."""
@@ -10118,7 +9858,7 @@ def _get_carbon_url(code):
     encoded_params = urllib.parse.urlencode(params)
     return "https://carbon.now.sh/?"+str(encoded_params)
 
-def display_code_cell(code, *, title="Code Cell", language=None):
+def display_code_cell(code, *, title="Code Cell"):
     """
     Print code cell with formatting, line numbers, and syntax highlighting.
     In a terminal, it displays a clickable link to bring you to the source code copyable online via carbon.sh!
@@ -10130,10 +9870,6 @@ def display_code_cell(code, *, title="Code Cell", language=None):
         The code to display
     title : str
         The cell number to display in the title
-    language: str
-        If specified, can be like 'py' or 'md' or 'python3' or 'markdown' or 'JSX' or 'javascript' etc
-        If not specified, defaults to 'python3'
-        Right now, only python syntax highlighting is supported in the Jupyer version...though this could change.
 
     EXAMPLE:
         >>> display_code_cell(get_source_code(load_image))
@@ -10141,8 +9877,6 @@ def display_code_cell(code, *, title="Code Cell", language=None):
     """
     # IMPORTANT: Do not use f-strings in this function to maintain compatibility
     code = code.rstrip() #We have to for the printer...
-    language = language or 'python3'
-
     if not running_in_jupyter_notebook():
         num_prefix = "%s│"
         mln = number_of_lines(code)
@@ -10162,7 +9896,7 @@ def display_code_cell(code, *, title="Code Cell", language=None):
                 )
                 + "\n"
                 + with_line_numbers(
-                    fansi_pygments(code, language),
+                    fansi_pygments(code, "python3"),
                     align=True,
                     prefix=fansi(num_prefix, "dark white white dark white"),
                     start_from=1,
@@ -11547,10 +11281,6 @@ def rinsp(object,search_or_show_documentation:bool=False,show_source_code:bool=F
             by_string = '(unknown process: %s)'%repr(e)
             print(col(tab + 'PORT %i IS TAKEN '%object + by_string))
                 
-    if isinstance(object, int):
-        filesize_string = human_readable_file_size(object)
-        print(col(tab + 'Filesize:'),filesize_string)
-                
  
     if is_symlink(object):
         print(col(tab + 'SYMLINK --> '+read_symlink(object)))
@@ -11578,7 +11308,6 @@ def rinsp(object,search_or_show_documentation:bool=False,show_source_code:bool=F
                     append_stat('#lines',number_of_lines_in_file(path))    
                 if is_video_file(path):
                     append_stat('duration',str(get_video_file_duration(path))+'s')
-                    append_stat('shape',str(get_video_file_shape(path)))
             else:
                 append_stat('FOLDER STATS')
                 append_stat('#files',len(get_all_files(path)))
@@ -15446,7 +15175,6 @@ def display_image_in_terminal(image,dither=True,auto_resize=True,bordered=False)
     print(c.frame())
 
 
-_use_rp_timg=True
 def display_image_in_terminal_color(image,*,truecolor=True):
     """
     Will attempt to draw a color image in the terminal
@@ -15479,44 +15207,28 @@ def display_image_in_terminal_color(image,*,truecolor=True):
         #For example, display_image_in_terminal_color(uniform_float_color_image(5,10,(255,0,255,255)))
         image = bordered_image_solid_color(image, thickness=0, bottom=1, color="black")
 
-    def _helper(timg):
-        # Get the timg module and use its functionality directly
-        timg_renderer = timg.Renderer()
-        
-        # Load the image
-        #timg_renderer.load_image_from_file(temp_file)
-        timg_renderer.load_image(rp.as_pil_image(image))
-        
-        # Choose the appropriate rendering method based on truecolor flag
-        #    ┌─────────┬──────────────────────────────────────────────┐
-        #    │ Method  │ Description                                  │
-        #    ├─────────┼──────────────────────────────────────────────┤
-        #    │ sixel   │ use sixels - best quality but lowest support │
-        #    │ a8f     │ low-resolution ANSI 8-bit palette            │
-        #    │ a24f    │ low-resolution ANSI 24-bit palette           │
-        #    │ a8h     │ high-resolution ANSI 8-bit palette           │
-        #    │ a24h    │ high-resolution ANSI 24-bit palette          │
-        #    │ ascii   │ ASCII art                                    │
-        #    └─────────┴──────────────────────────────────────────────┘
-        method = 'a24h' if truecolor else 'a8h'
-        
-        # Render the image with the selected method
-        timg_renderer.render(timg.METHODS[method]['class'])
-
-    global _use_rp_timg
-
-    if _use_rp_timg:
-        try:
-            _helper(timg)
-        except PermissionError:
-            #On XCloud, it fails to build because we have no write permission in that directory for the c compilation of my optimized version
-            _use_rp_timg=False
-
-    if not _use_rp_timg:
-        pip_import('timg')
-        import timg
-        _helper(timg)
-
+    # Get the timg module and use its functionality directly
+    timg_renderer = timg.Renderer()
+    
+    # Load the image
+    #timg_renderer.load_image_from_file(temp_file)
+    timg_renderer.load_image(rp.as_pil_image(image))
+    
+    # Choose the appropriate rendering method based on truecolor flag
+    #    ┌─────────┬──────────────────────────────────────────────┐
+    #    │ Method  │ Description                                  │
+    #    ├─────────┼──────────────────────────────────────────────┤
+    #    │ sixel   │ use sixels - best quality but lowest support │
+    #    │ a8f     │ low-resolution ANSI 8-bit palette            │
+    #    │ a24f    │ low-resolution ANSI 24-bit palette           │
+    #    │ a8h     │ high-resolution ANSI 8-bit palette           │
+    #    │ a24h    │ high-resolution ANSI 24-bit palette          │
+    #    │ ascii   │ ASCII art                                    │
+    #    └─────────┴──────────────────────────────────────────────┘
+    method = 'a24h' if truecolor else 'a8h'
+    
+    # Render the image with the selected method
+    timg_renderer.render(timg.METHODS[method]['class'])
 
 def display_image_in_terminal_imgcat(image):
     """
@@ -15936,7 +15648,6 @@ def _clean_cd_history():
     #It removes all the red entries
     entries=_get_cd_history()
     entries=[entry for entry in entries if path_exists(entry) or _cdh_folder_is_protected(entry)]
-    entries=[entry for entry in entries if not '/rp/outputs/claudecode/workspace_' in entry] #These get spammy...
     string_to_text_file(_cd_history_path,line_join(entries))
 
 def set_prompt_style(style:str=None):
@@ -16466,9 +16177,8 @@ def _eta(total_n,*,min_interval=.3,title="r.eta"):
     interval_timer = tic()
     title = title + ": "
     shown_done = False
-    style = 'invert'
 
-    def fansi_progress(string, proportion):
+    def fansi_progress(string, proportion, style='underlined'):
         """ Used to show a progress bar under the ETA text! """
         string = string.expandtabs() #Jupyter doesn't render underlines over tabs
         num_chars = round(len(string) * proportion)
@@ -16563,11 +16273,10 @@ class eta:
         self.display_eta(n)
 
     def __iter__(self):
-        if len(self):
-            for i,e in enumerate(self.elements):
-                self(i)
-                yield e
-            self(i+1)
+        for i,e in enumerate(self.elements):
+            self(i)
+            yield e
+        self(i+1)
 
     def __len__(self):
         return len(self.elements)
@@ -17245,58 +16954,6 @@ def exeval(code:str, scope=None):
 
     return result
 
-_prev_pterm_profiler = None
-
-def _display_pterm_flamechart(local=False):
-    if _prev_pterm_profiler is None:
-        fansi_print("RP Flamechart: Nothing was profiled yet, try running a command after setting PROF ON", 'yellow bold')
-        return
-    
-    fansi_print("RP Flamechart: Generating HTML...", 'green bold')
-    html = _prev_pterm_profiler.output_html()
-
-    fansi_print("RP Flamechart: Uploading HTML...", 'green bold')
-
-    if not local and connected_to_internet():
-        _web_copy(html.encode(), show_progress=True)
-        output_location = _web_clipboard_url
-    else:
-        output_location = "file://" + save_text_file(html, temporary_file_path("html"))
-
-    fansi_print(
-        "RP Flamechart: Visit flamechart at " + output_location,
-        "green bold underdouble",
-        link=output_location,
-    )
-
-    return html, output_location
-
-def _truncate_string_floats(s, num_sigfigs=4) -> str:
-    """
-    Truncate floating point numbers in a string to the specified number of significant figures.
-    Is robust - doesn't care about syntax of the given string. Does it to ALL numbers.
-
-    Args:
-        s (str): Input string containing floating point numbers
-        num_sigfigs (int): Number of significant figures to keep
-
-    Returns:
-        str: String with floating point numbers truncated
-
-    >>> truncate_floats('''"time": 0.001026,"attributes": {"l29952": 0.0010257080430164933},''')
-    ans = "time": 0.001026,"attributes": {"l29952": 0.001026},
-
-    """
-    import re
-    pattern = r'(\d+\.\d+)'
-
-    def replace(match):
-        num = float(match.group(0))
-        format_str = '{{:.{}g}}'.format(num_sigfigs)
-        return format_str.format(num)
-
-    return re.sub(pattern, replace, s)
-
 def _pterm_exeval(code,*dicts,exec=exec,eval=eval,tictoc=False,profile=False,ipython=False):
     """
     Evaluate or execute within descending hierarchy of dicts
@@ -17306,8 +16963,6 @@ def _pterm_exeval(code,*dicts,exec=exec,eval=eval,tictoc=False,profile=False,ipy
     if len(dicts)<=1:
     print("exeval")
     """
-    global _prev_pterm_profiler
-
     if len(dicts)==0:
       dicts=[get_scope(1)]
     merged_dict=dicts[0]
@@ -17365,9 +17020,7 @@ def _pterm_exeval(code,*dicts,exec=exec,eval=eval,tictoc=False,profile=False,ipy
                 print(profiler.output_text(unicode=True, color=True,timeline=False,show_all=_PROF_DEEP).replace('\n\n','\n')[1:-1])#show_all is useful but SOOO verbose it's almost unbearable...
                 fansi_print("...took "+str(_time()-prof_display_start_time)+" seconds to diplay the PROF output",'blue','underlined')
             else:
-                profiler.stop()#Something tells me its not a good idea to leave stray _pterm_profilers running...
-            global _prev_pterm_profiler
-            _prev_pterm_profiler = profiler
+                profiler.stop()#Something tells me its not a good idea to leave stray profilers running...
 
 _PROF_DEEP=True
 
@@ -18195,8 +17848,6 @@ def make_symlink(original_path, symlink_path=".", *, relative=False, replace=Fal
     if replace and is_symlink(symlink_path):
         os.remove(symlink_path)
     
-    make_parent_folder(symlink_path)
-
     os.symlink(original_path,symlink_path)
     
     return symlink_path
@@ -19287,7 +18938,7 @@ def _convert_powerpoint_file(path,message=None):
 
 
 def _write_default_gitignore():
-    types_to_ignore='pyc bak swh swi swj swk swl swm swn swo swp un~ gstmp ipynb_checkpoints DS_Store'.split()
+    types_to_ignore='pyc bak swo swp swn swm swh swi swj swk swl swm swn swo swp un~ gstmp ipynb_checkpoints DS_Store'.split()
     types_to_ignore=['*.'+x for x in types_to_ignore]
 
     new_lines = (
@@ -19664,13 +19315,6 @@ def pseudo_terminal(
                 except Exception:pass#print("Failed to set numpy width")# AttributeError: readonly attribute '__module__'
                 fansi_print("ans = " + val_str,('green'if save_history or force_green else 'yellow')if use_ans_history else 'gray')
 
-        def eval_for_rinsp(x,*args):
-            try:
-                return eval(x,*args)
-            except SyntaxError:
-                fansi_print("Treating message as string...",'italic magenta')
-                return str(x)
-
         def print_history(return_as_string_instead_of_printing=False):
             output=''
             output+=fansi("HISTORY --> Here is a list of all valid python commands you have entered so far (green means it is a single-line command, whilst yellow means it is a multi-lined command):",'blue','underlined')+'\n'
@@ -19899,10 +19543,6 @@ def pseudo_terminal(
         PROF
         PROF ON
         PROF OFF
-        PROF FLAME
-        PROF FLAME OPEN
-        PROF FLAME COPY
-        PROF FLAME PASTE
 
         <Toggle Colors>
         FANSI ON
@@ -20000,7 +19640,6 @@ def pseudo_terminal(
         CDH
         CDH FAST
         CDH GIT
-        CDM
         CDZ
         CDQ
         CAT
@@ -20130,9 +19769,7 @@ def pseudo_terminal(
         FC FCOPY
         MLP MLPASTE
 
-        PSP  $delist($shlex.split($string_from_clipboard()))
-        PAS  $delist($shlex.split($string_from_clipboard()))
-        PASH $delist($shlex.split($string_from_clipboard()))
+        PSP $shlex.split($string_from_clipboard())
 
         TPWC $web_copy($printed($tmux_paste()))
         WCTP $web_copy($printed($tmux_paste()))
@@ -20289,12 +19926,6 @@ def pseudo_terminal(
         PF PROF
         PO PROF
         POD PROF DEEP
-        POF   PROF FLAME
-        FLAME PROF FLAME
-        FLA   PROF FLAME
-        FLAO  PROF FLAME OPEN
-        FLAC  PROF FLAME COPY
-        FLAP  PROF FLAME PASTE
 
         N  NEXT
         P  PREV
@@ -20360,8 +19991,6 @@ def pseudo_terminal(
         SFE $strip_file_extension(ans) if isinstance(ans,str) else $strip_file_extensions(ans)
         GFE $get_file_extension(ans) if isinstance(ans,str) else $get_file_extensions(ans)
 
-        64P  ans=$printed($string_from_clipboard()) ; $fansi_print($human_readable_file_size(len( ans )), 'bold cyan') ; ans=$base64_to_object(ans)   #Copy object via Base64 String
-        64C _ans64=$printed($object_to_base64(ans)) ; $fansi_print($human_readable_file_size(len(_ans64)), 'bold cyan') ; $string_to_clipboard(_ans64) #Copy object via Base64 String
 
         # GO GC
 
@@ -20536,9 +20165,9 @@ def pseudo_terminal(
 
         IASM $import_all_submodules(ans,verbose=True);
 
-        SUH $sublime($get_current_directory())
+        SUH $sublime('.')
         SUA $sublime(ans)
-        COH !code .
+        COH $vscode('.')
         COA $vscode(ans)
 
         SG $save_gist(ans)
@@ -20594,9 +20223,7 @@ def pseudo_terminal(
         JA  JSON ANS
         JEA JSON ANS
         LJEA [$line_join(x) for x in ans] #Line Join Each Ans
-        CJ   ans.split(",") if isinstance(ans,str) else ",".join(map(str,ans)) 
-        SJ   ans.split(" ") if isinstance(ans,str) else " ".join(map(str,ans)) 
-        SPAJ ans.split(" ") if isinstance(ans,str) else " ".join(map(str,ans)) 
+        CJ ",".join(map(str,ans))
 
         SGC $select_git_commit()
         DUNKA $pip_import('dunk');$os.system(f"git diff {ans} | dunk")
@@ -20609,8 +20236,8 @@ def pseudo_terminal(
 
         DCI $display_image_in_terminal_color(ans)
         
-        FCA $web_copy_path(ans,show_progress=True)
-        FCH print("FCH->FileCopyHere");$web_copy_path($get_absolute_path('.'),show_progress=True)
+        FCA $web_copy_path(ans)
+        FCH print("FCH->FileCopyHere");$web_copy_path($get_absolute_path('.'))
         RMA $r._rma(ans)
         RNA $rename_file(ans,$input_default($fansi('NewPathName:','blue'),$get_file_name(ans)))
         APA $r._absolute_path_ans(ans)
@@ -21018,34 +20645,6 @@ def pseudo_terminal(
                         else:
                             fansi_print("Toggled _PROF_DEEP. We just the PROFILER to DEEP mode OFF. Use PROF DEEP again to go back to deep mode.", 'blue', 'underlined')
                             _PROF_DEEP=False
-
-                    elif user_message in ['PROF FLAME']:
-                        flamechart_html, flamechart_location = _display_pterm_flamechart(local=False)
-
-                    elif user_message in ['PROF FLAME OPEN']:
-                        flamechart_html, flamechart_location = _display_pterm_flamechart(local=True)
-                        open_file_with_default_application(flamechart_location)
-
-                    elif user_message in ['PROF FLAME COPY']:
-                        flamechart_html, flamechart_location = _display_pterm_flamechart(local=True)
-                        string_to_clipboard(flamechart_html)
-                        compressed_html = object_to_base64(_truncate_string_floats(flamechart_html))
-                        print(compressed_html)
-                        fansi_print(
-                            "Copied flamechart compressed HTML to clipboard! (or if not, copy the above base64 string). View it with FLAP (PROF FLAME PASTE) on a local rp",
-                            "bold cyan",
-                        )
-
-                    elif user_message in ['PROF FLAME PASTE']:
-                        compressed_html = string_from_clipboard()
-                        html = base64_to_object(compressed_html)
-                        assert isinstance(html, str), 'Failed to decode pasted flamechart!'
-                        path = temporary_file_path('html')
-                        save_text_file(html, path)
-                        open_file_with_default_application(path)
-                        fansi_print("Copied HTML from clipboard to "+path, 'bold cyan')
-
-
 
                     elif user_message == 'WARN':
                         if _warnings_are_off():
@@ -21473,7 +21072,7 @@ def pseudo_terminal(
                             fansi_print("        *Note: I noticed that ans is callable. If you're trying to copy a function, make sure you paste it in the same python version!",'blue')
 
                         fansi_print("    ...please wait, communicating with "+repr(_web_clipboard_url)+"...","blue",new_line=False)
-                        web_copy(get_ans(), show_progress=True)
+                        web_copy(get_ans())
                         fansi_print("done in "+str(time()-start_time)[:6]+' seconds!',"blue",new_line=True)
                         successful_command_history.append("#WCOPY rp.web_copy(ans)")
 
@@ -21624,7 +21223,7 @@ def pseudo_terminal(
                             _view_image_via_textual_imageview(get_ans())
                     elif user_message.endswith('?v') and not '\n' in user_message:
                         user_message=user_message[:-2]
-                        value=eval_for_rinsp(user_message,scope())
+                        value=eval(user_message,scope())
                         if not is_image(value):
                             if _get_pterm_verbose(): fansi_print("?v --> Running rp.vim(%s)..."%user_message,"blue",'bold',new_line=False)
                             if _get_pterm_verbose(): fansi_print("done!","blue",'bold')
@@ -21652,7 +21251,7 @@ def pseudo_terminal(
                     elif user_message.endswith('?lj') and not '\n' in user_message:
                         if _get_pterm_verbose(): fansi_print("?lj --> string viewer --> shows line_join(map(str,ans))","blue",'bold')
                         user_message=user_message[:-3]
-                        value=eval_for_rinsp(user_message,scope())
+                        value=eval(user_message,scope())
                         string=line_join(map(str,value))
                         print(string)
                         _maybe_display_string_in_pager(string)
@@ -21665,7 +21264,7 @@ def pseudo_terminal(
                     elif user_message.endswith('?t') and not '\n' in user_message:
                         user_message=user_message[:-2]
                         if _get_pterm_verbose(): fansi_print("t --> Table Viewer --> Running view_table(%s):"%user_message,"blue",'bold')
-                        value=eval_for_rinsp(user_message,scope())
+                        value=eval(user_message,scope())
                         view_table(value)
 
                     elif user_message=='?vd' or user_message=='VDA':
@@ -21677,7 +21276,7 @@ def pseudo_terminal(
                     elif user_message.endswith('?vd') and not '\n' in user_message:
                         user_message=user_message[:-2]
                         if _get_pterm_verbose(): fansi_print("?vd --> Visidata --> Running launch_visidata(%s):"%user_message,"blue",'bold')
-                        value=eval_for_rinsp(user_message,scope())
+                        value=eval(user_message,scope())
                         new_value=launch_visidata(value)
                         set_ans(new_value)
 
@@ -21687,7 +21286,7 @@ def pseudo_terminal(
                     elif user_message.endswith('?p') and not '\n' in user_message:
                         user_message=user_message[:-2]
                         if _get_pterm_verbose(): fansi_print("?p --> Pretty Print --> Running pretty_print(%s,with_lines=False):"%user_message,"blue",'bold')
-                        value=eval_for_rinsp(user_message,scope())
+                        value=eval(user_message,scope())
                         pterm_pretty_print(value,with_lines=False)
                         #pip_import('rich').print(value)
                     elif user_message=='?j':
@@ -21696,7 +21295,7 @@ def pseudo_terminal(
                     elif user_message.endswith('?j') and not '\n' in user_message:
                         user_message=user_message[:-2]
                         if _get_pterm_verbose(): fansi_print("?j --> JSON Viewer --> Interactively displaying ans with collapsible menus with r._view_interactive_json","blue",'bold')
-                        value=eval_for_rinsp(user_message,scope())
+                        value=eval(user_message,scope())
                         _view_interactive_json(value)
                     elif user_message=='?i':
                         fansi_print("?i --> PyPI Package Inspection:","blue",'bold')
@@ -21768,7 +21367,7 @@ def pseudo_terminal(
                         # rinsp(eval(user_message[:-2],scope()),1)
                     elif user_message.endswith("?"):
                         if _get_pterm_verbose(): fansi_print("◊? --> rinsp(◊)","blue")
-                        rinsp(eval_for_rinsp(user_message[:-1],scope()))
+                        rinsp(eval(user_message[:-1],scope()))
 
                     elif user_message=='PWD':
                         fansi_print("PWD: "+_fansi_highlight_path(get_current_directory()),"blue",'bold')
@@ -21776,9 +21375,6 @@ def pseudo_terminal(
                         fansi_print("CPWD: Copied current directory to clipboard: "+_fansi_highlight_path(get_current_directory()),"blue",'bold')
                         string_to_clipboard(get_current_directory())
                     elif user_message.startswith('CAT ') or user_message.startswith('NCAT ') or user_message in ['CAT','NCAT','CATA','NCATA']:
-
-                        if user_message.startswith('CAT ' ):user_message = 'CAT '  + _autocomplete_lss_name(user_message,command_name='CAT' )
-                        if user_message.startswith('NCAT '):user_message = 'NCAT ' + _autocomplete_lss_name(user_message,command_name='NCAT')
 
                         if user_message in ['CAT','NCAT']:
                             print("Please select the file you would like to display")
@@ -21833,10 +21429,6 @@ def pseudo_terminal(
                         print_code(contents,highlight,line_numbers)
 
                     elif user_message.startswith('CCAT ') or user_message=='CCAT' or user_message=='CCATA':
-
-                        if user_message.startswith('CCAT '):
-                            user_message = 'ACAT '+_autocomplete_lss_name(user_message,command_name='CCAT')
-
                         if user_message=='CCATA':
                             if _get_pterm_verbose(): fansi_print('CCAT -->text_file_to_string Copy CAT ans --> Copies the contents of the file or url at \'ans\' to your clipboard','blue','bold')
                             user_message='CCAT '+str(get_ans())
@@ -22042,7 +21634,7 @@ def pseudo_terminal(
                             from time import time
                             start_time=time()
                             fansi_print("    ...please wait, communicating with "+repr(_web_clipboard_url)+"...","blue",new_line=False)
-                            web_copy_path(path, show_progress=True)
+                            web_copy_path(path)
                             fansi_print("done in "+str(time()-start_time)[:6]+' seconds!',"blue",new_line=True)
                             user_message=repr(path)
 
@@ -22977,7 +22569,6 @@ def pseudo_terminal(
                                 or user_message.startswith("CD ")
                                 or user_message.startswith("CDU ")
                                 or user_message.startswith("CDH ")
-                                or user_message.startswith("CDM ")
                                 or user_message == "CDP"
                                 or not is_valid_python_syntax(user_message) and folder_exists(rp.os.path.expanduser(user_message))
                             )
@@ -22991,22 +22582,6 @@ def pseudo_terminal(
                             if not is_valid_python_syntax(user_message) and folder_exists(rp.os.path.expanduser(user_message)):
                                 #Pasting a folder path and entering CD's to it
                                 user_message = "CD "+user_message
-
-                            if user_message.startswith('CDM '):
-                                module_name = user_message[len("CDM "):].strip()
-                                try:
-                                    module_path = get_module_path_from_name(module_name)
-                                except Exception:
-                                    fuzzy_module_name = _ric_current_candidate_fuzzy_matches(module_name)
-                                    if fuzzy_module_name is not None:
-                                        fansi_print('CDM: Completed module to '+repr(fuzzy_module_name),'blue')
-                                        module_name = fuzzy_module_name
-
-                                    module_path = get_module_path_from_name(module_name)
-                                
-                                if is_a_file(module_path):
-                                    module_path = get_parent_folder(module_path)
-                                user_message = 'CD '+module_path
 
                             if user_message.startswith('CD '):
                                 #Do fuzzy searching
@@ -23435,9 +23010,9 @@ def pseudo_terminal(
             fansi_print("    - Exiting pseudo-terminal at "+level_label(),'blue' ,'bold')
 
 # @formatter:off
-def set_process_title(title):
-    return pip_import('setproctitle').setproctitle(title)
-
+try:from setproctitle import setproctitle as set_process_title \
+        ,getproctitle as get_process_title
+except Exception:pass
 def get_process_title():
     try:
         import setproctitle
@@ -24855,17 +24430,11 @@ def cv_bgr_rgb_swap(image_or_video):
     Works for both images AND video
     Opencv has an annoying feature: it uses BGR instead of RGB. Heckin' hipsters. This swaps RGB to BGR, vice-versa.
     """
-    out = np.asarray(image_or_video)
-
-    assert is_image(out)
-
-    if out.ndim==2: return out #Grayscale
-
-    num_channels = out.shape[-1]
-
-    if   num_channels==3: return out[..., [2,1,0]]   #RGB
-    elif num_channels==4: return out[..., [2,1,0,3]] #RGBA
-
+    image_or_video=np.asarray(image_or_video)
+    image_or_video=image_or_video.copy()
+    temp=image_or_video.copy()
+    image_or_video[...,0],image_or_video[...,2]=temp[...,2],temp[...,0]
+    return image_or_video
 cv_rgb_bgr_swap=cv_bgr_rgb_swap#In-case you forgot what to type. It's all the same thing though.
 
 _first_time_using_cv_imshow=True
@@ -25326,7 +24895,7 @@ def cv_line_graph(
     Draws a line graph using OpenCV with the given values and colors.
 
     Args:
-        y_values (list or numpy.ndarray): The y-values of the data points. This is NOT in image-coordinates, it's in graph coordinates.
+        y_values (list or numpy.ndarray): The y-values of the data points.
         x_values (list or numpy.ndarray, optional): The x-values of the data points. If not provided, the indices of y_values will be used.
         height (int, optional): The height of the output image. If not provided, it will be determined based on the range of y-values.
         width (int, optional): The width of the output image. If not provided, it will be determined based on the number of data points.
@@ -25441,8 +25010,8 @@ def cv_line_graph(
     x_values = np.array(x_values, dtype=np.float32) if x_values is not None else np.arange(len(y_values), dtype=np.float32)
 
     # Determine the dimensions of the output image if not provided
-    height = height or int(np.ptp(y_values)+1)
-    width  = width  or int(np.ptp(x_values)+1)
+    height = height or int(np.ptp(y_values))
+    width = width or len(y_values)
 
     # Create the output image with the specified background color
     graph = np.full((height, width, 4), background_color, dtype=np.uint8)
@@ -26836,18 +26405,7 @@ class HandyDict(dict):
 
 #TODO: HandySet
 
-def _torch_tensor_to_bytes_for_hashing(tensor):
-    #https://stackoverflow.com/questions/63880081/how-to-convert-a-torch-tensor-into-a-byte-string - not using numpy
-    #This includes the device!
-    import torch 
-    import io
-    buff = io.BytesIO()
-    torch.save(tensor, buff)
-    buff.seek(0)  # <--  this is what you were missing
-    return buff.read()
-
-
-def handy_hash(value):
+def handy_hash(value,fallback=None):
     """
     This function is really handy!
     Meant for hashing things that can't normally be hashed, like lists and dicts and numpy arrays. It pretends they're immutable.
@@ -26855,24 +26413,15 @@ def handy_hash(value):
     For example, lists are turned into tuples, and dicts like {"A":"B","C":"D"} are turned into ((""))
     If it can't hash something, it will just use fallback to hash it. By default, though, fallback is
     """
-
-    def fallback(value):
+    def default_fallback(value):
         # fansi_print('Warning: fallback_hash was called on value where repr(value)=='+repr(value),'yellow') #This is annoying
         return id(value)
-
+    fallback=fallback or default_fallback
+    value_type=type(value)
     try:return hash(value)
     except Exception:pass#This is probably going to happen a lot in this function lol (that's kinda the whole point)
-
-    bytes_hasher = get_sha256_hash
-
-    if is_torch_tensor(value): return hash(('TORCH SHA256', bytes_hasher(_torch_tensor_to_bytes_for_hashing(value.detach().cpu()))))
-    if is_numpy_array (value): return hash(('NUMPY SHA256', bytes_hasher(value.tobytes())))
-
-    value_type=type(value)
-
-    try:return hash(('DILL HASH', bytes_hasher(_dill_dumps(value))))#The dill library is capable of hashing a great many things...including numpy arrays! This was added after my original implementation of handy_hash, as dill is able to handle a huuuggggeee amount of different types
+    try:return hash(('DILL HASH',object_to_bytes(value)))#The dill library is capable of hashing a great many things...including numpy arrays! This was added after my original implementation of handy_hash, as dill is able to handle a huuuggggeee amount of different types
     except Exception:pass
-
     hasher=__hashers[value_type] if value_type in __hashers else fallback
     return hasher(value)
 
@@ -27023,33 +26572,13 @@ def memoized_property(method):
     memoized_property=property(memoized_property)
     return memoized_property
 
-def _omni_load_animated_image(path):
-    """ gif and webp and png can be either a video or image depending on context... """
-    video = load_video(path, show_progress=False) #A non-animated gif will return a video with a single frame
-    if len(video)==1:
-        return video[0]
-    return video
-
-def _omni_save_animated_image(video,path):
-    """ gif and webp and png can be either a video or image depending on context... """
-    if is_image(video):
-        return save_image(video, path)
-    else:
-        return save_video(video, path)
-
-
 def _omni_load(path):
     if ends_with_any(path, '.json'): return rp.load_json(path)
     if ends_with_any(path, '.yaml'): return rp.load_yaml(path)
-    if ends_with_any(path, '.png .webp .gif'.split()): return rp._omni_load_animated_image(path)
-    if ends_with_any(path, '.jpg .jpeg .jxl .exr .psd .tga .tiff .tif .jp2 .bmp'.split()): return rp.load_image(path)
-    if ends_with_any(path, '.mp4 .avi .mkv .flv .mov .m4v .wmv .webm'.split()): return rp.load_video(path)
+    if ends_with_any(path, '.png .jpg .jpeg .jxl .exr'.split()): return rp.load_image(path)
+    if ends_with_any(path, '.mp4 .gif'.split()): return rp.load_video(path)
     if ends_with_any(path, '.npy'.split()): return np.load(path)
-    if ends_with_any(path, '.tsv'.split()): return load_tsv(path,show_progress=True)
-    if ends_with_any(path, '.csv'.split()): return __import__('pandas').read_csv(path)
-    if ends_with_any(path, '.parquet'.split()): return load_parquet(path,show_progress=True)
-    if ends_with_any(path, '.safetensors'.split()): return load_safetensors(path)
-    if ends_with_any(path, '.pt .pth .ckpt'.split()): return __import__('torch').load(path)
+    if ends_with_any(path, '.pth .ckpt'.split()): return __import__('torch').load(path)
     if is_image_file(path): return load_image(path)
     if is_video_file(path): return load_video(path)
     if is_utf8_file(path): return load_text_file(path)
@@ -27058,12 +26587,10 @@ def _omni_load(path):
 def _omni_save(object, path):
     if ends_with_any(path, '.json'): return rp.save_json(object,path)
     if ends_with_any(path, '.yaml'): return rp.save_yaml(object,path)
-    if ends_with_any(path, '.png .webp .gif'.split()): return rp._omni_save_animated_image(object, path)
-    if ends_with_any(path, '.jpg .jpeg .jxl .exr .psd .tga .tiff .tif .jp2 .bmp'.split()): return rp.save_image(object, path)
-    if ends_with_any(path, '.mp4'.split()): return rp.save_video(object, path)
+    if ends_with_any(path, '.png .jpg .jpeg .jxl .exr'.split()): return rp.save_image(object, path)
+    if ends_with_any(path, '.mp4 .gif'.split()): return rp.save_video(object, path)
     if ends_with_any(path, '.npy'.split()): return np.save(path,object)
-    if ends_with_any(path, '.pt .pth .ckpt'.split()): return __import__('torch').save(object,path)
-    if ends_with_any(path, '.safetensors'.split()): return save_safetensors(object,path)
+    if ends_with_any(path, '.pth .ckpt'.split()): return __import__('torch').save(object,path)
     if isinstance(object, str): return save_text_file(object, path)
     if isinstance(object, bytes): return bytes_to_file(object, path)
     return object_to_file(object,path)
@@ -27394,106 +26921,17 @@ class CachedInstances:
             cls._instance_cache = HandyDict()
         return cls._instance_cache
 
-
-def _get_hash(source, hash_func_name, func_display_name, *, show_progress, format):
-    """
-    Helper function to calculate a hash of the provided data or file contents.
-    
-    :param source: The data or file path to hash
-    :param hash_func_name: Name of the hash function to use (e.g., 'md5', 'sha256')
-    :param func_display_name: Display name for error messages
-    :param show_progress: Whether to display a progress bar
-    :param format: Output format of the hash. Options: 'hex', 'int', 'bytes', 'base64'
-    :return: The hash in the specified format
-    """
-    import hashlib
-    import os
-    import io
-    import base64
-    
-    hash_obj = getattr(hashlib, hash_func_name)()
-    
-    if isinstance(source, bytes):
-        byte_stream = io.BytesIO(source)
-        total_size = len(source)
-        progress_desc = "Hashing data via " + hash_func_name
-    elif isinstance(source, str) and os.path.isfile(source):
-        byte_stream = open(source, 'rb')
-        total_size = os.path.getsize(source)
-        progress_desc = "Hashing file via " + hash_func_name
-    else:
-        raise TypeError("rp." + func_display_name + ": Unsupported input type '" + type(source).__name__ + "'")
-    
-    progress_bar = None
-    if show_progress:
-        #TODO: Make it unified with load_files, one unified tqdm/eta function - supporting the same argument formats
-        pip_import('tqdm')
-        from tqdm import tqdm
-        progress_bar = tqdm(total=total_size, desc=progress_desc, unit='B', unit_scale=True, unit_divisor=1024)
-    
-    chunk_size = 4096 #A nice big chunk size
-    while True:
-        chunk = byte_stream.read(chunk_size)
-        if not chunk:
-            break
-        hash_obj.update(chunk)
-        if show_progress:
-            progress_bar.update(len(chunk))
-    
-    if hasattr(byte_stream, 'close'):
-        byte_stream.close()
-    
-    # Return hash in requested format
-    if format in ('hex', 'base16'):
-        return hash_obj.hexdigest()
-    elif format == 'int':
-        return int(hash_obj.hexdigest(), 16)
-    elif format == 'bytes':
-        return hash_obj.digest()
-    elif format == 'base64':
-        return bytes_to_base64(hash_obj.digest())
-    else:
-        raise ValueError("rp." + func_display_name + ": Unsupported format '" + format + "'. Options: 'hex', 'int', 'bytes', 'base64'")
-
-def get_md5_hash(source, format='hex', *, show_progress: bool = False):
-    """
-    Calculate the MD5 hash of the provided data or the contents of a file specified by its path.
-    It is both slower AND worse than get_sha256_hash
-
-    :param source:
-        - bytes: The data to hash.
-        - str: The file path whose contents are to be hashed.
-    :param show_progress: Keyword-only argument that dictates whether to display a progress bar during the hash computation.
-    :param format: Keyword-only argument that specifies the output format of the hash. 
-                  Options: 'hex'/'base16', 'int', 'bytes', 'base64'.
-    :return: The MD5 hash in the specified format.
-
-    EXAMPLES:
-        >>> get_md5_hash('/Users/ryan/Downloads/A dolphin reading.png')
-        ans = 3d8909facff8e0c479d984d6adcf51c1
-        >>> get_md5_hash(b'test bytestring')
-        ans = 18485e0c32cc8aa30d80dbecdd4fac50
-        >>> get_md5_hash(object_to_bytes([1,2,3,4,5]))
-        b'3b5d3c7d207e37dceeedd301e35e2e58'
-        >>> get_md5_hash('/path/to/file', format='int')
-        78854878685254270795816465693052641713
-        >>> get_md5_hash('/path/to/file', format='base64')
-        'kJh5Sq2LpZ3v2dYHPvs8uQ=='
-    """
-    return _get_hash(source, 'md5', 'get_md5_hash', show_progress=show_progress, format=format)
-
-def get_sha256_hash(source, format='hex', *, show_progress: bool = False):
+def get_sha256_hash(source, *, show_progress: bool = False, as_int: bool = False) -> str:
     """
     Calculate the SHA-256 hash of the provided data or the contents of a file specified by its path.
-    It is both better AND faster than get_md5_hash
+    If as_int is True, returns the hash as an integer.
 
     :param source:
         - bytes: The data to hash.
         - str: The file path whose contents are to be hashed.
     :param show_progress: Keyword-only argument that dictates whether to display a progress bar during the hash computation.
-    :param format: Keyword-only argument that specifies the output format of the hash. 
-                  Options: 'hex'/'base16', 'int', 'bytes', 'base64'.
-    :return: The SHA-256 hash in the specified format.
+    :param as_int: Keyword-only argument that returns the hash as an integer instead of a hexadecimal string.
+    :return: The SHA-256 hash as a hexadecimal string or an integer.
 
     EXAMPLES:
         >>> get_sha256_hash('/Users/ryan/Downloads/A dolphin reading.png')
@@ -27502,13 +26940,50 @@ def get_sha256_hash(source, format='hex', *, show_progress: bool = False):
         ans = 79945b2e3369479b02fabcd95a6d124524a2939e40003c2dcba182c35cf6c10a
         >>> get_sha256_hash(object_to_bytes([1,2,3,4,5]))
         ans = ab10184fc37b8a4bf42feef31ada80b347d2096b0dc161921579753765565577
-        >>> get_sha256_hash('/path/to/file', format='int')
+        >>> get_sha256_hash('/path/to/file', as_int=True)
         69026873886289201118877060911792184041901559641924946149006354401672729373074
-        >>> get_sha256_hash('/path/to/file', format='base64')
-        'g+YuWoycDlhZ9+VRXimYoxXqkR+OFv4PlM0/Y9p9D0E='
     """
-    return _get_hash(source, 'sha256', 'get_sha256_hash', show_progress=show_progress, format=format)
+    import hashlib
+    import os
+    import io
 
+    hash_obj = hashlib.sha256()
+
+    if isinstance(source, bytes):
+        byte_stream = io.BytesIO(source)
+        total_size = len(source)
+        progress_desc = "Hashing data"
+    elif isinstance(source, str) and os.path.isfile(source):
+        byte_stream = open(source, 'rb')
+        total_size = os.path.getsize(source)
+        progress_desc = "Hashing file"
+    else:
+        raise TypeError("rp.get_sha256_hash: Unsupported input type '" + type(source).__name__ + "'")
+
+    progress_bar = None
+    if show_progress:
+        #TODO: Make it unified with load_files, one unified tqdm/eta function - supporting the same argument formats
+        pip_import('tqdm')
+        from tqdm import tqdm
+        progress_bar = tqdm(total=total_size, desc=progress_desc, unit='B', unit_scale=True, unit_divisor=1024)
+
+    chunk_size = 4096 #A nice big chunk size
+    while True:
+        chunk = byte_stream.read(chunk_size)
+        if not chunk:
+            break
+        hash_obj.update(chunk)
+        if show_progress:
+            progress_bar.update(len(chunk))
+
+    if hasattr(byte_stream, 'close'):
+        byte_stream.close()
+
+    hash_result = hash_obj.hexdigest()
+    if as_int:
+        hash_result = int(hash_result, 16)
+
+    return hash_result
 
 def _labeled_image_text_to_image(text,
                                  align,
@@ -27658,7 +27133,7 @@ def labeled_image(image,
     background_color = as_rgba_float_color(background_color)
     text_color       = as_rgba_float_color(text_color)
 
-    image=as_numpy_image(image, copy=False)
+    image=as_numpy_image(image)
 
     assert is_image(image)
     assert position in ['top','bottom','left','right']
@@ -27708,7 +27183,7 @@ def labeled_image(image,
             height = abs(height)
             height = min(height, image_height)
             overlay = uniform_float_color_image(image_height - height, image_width, background_color[:3]+(0,))
-            overlay = gather_args_call(labeled_image, overlay, size=height, size_by_lines=False)
+            overlay = gather_args_call(labeled_image, overlay, size=height)
             return blend_images(image, overlay)
 
         height=max(height,1)         #Label height in pixels
@@ -27741,7 +27216,6 @@ def labeled_image(image,
             return vertically_concatenated_images(image,label)
         
     assert False,'This line should be unreachable'
-
 
 def _images_are_all_same_size(images):
     """ TODO: Use this for video processing functions instead of using for loops to check if image sizes are the same... """
@@ -29891,7 +29365,7 @@ def horizontally_concatenated_images(*image_list,origin=None):
         image_list=[image_converter(image,copy=False) for image in image_list]
         max_height=max(get_image_height(img) for img in image_list)
         def heightify(img):
-            img=as_numpy_image(img,copy=False)
+            img=as_numpy_image(img)
             s=list(img.shape)
             if s[0]==max_height:
                 return img #Don't copy - its slow.
@@ -30363,21 +29837,12 @@ def _grayscale_image_to_rgba_image     (image):return _rgb_image_to_rgba_image(_
 def _rgb_image_to_grayscale_image      (image):return _rgb_to_grayscale(image)
 def _rgb_image_to_rgb_image            (image):return as_numpy_array(image).copy()
 def _rgb_image_to_rgba_image           (image):
-    alpha = np.ones((*image.shape[:2], 1), image.dtype)
-
+    # assert False,'_rgb_image_to_rgba_image: Please fix me Im broken?!'
     if is_byte_image(image):
-        alpha *= 255
-
-    return np.concatenate((image, alpha), 2)
-
-#OLD CODE, WORKS BUT IS SLOW
-# def _rgb_image_to_rgba_image           (image):
-#     # assert False,'_rgb_image_to_rgba_image: Please fix me Im broken?!'
-#     if is_byte_image(image):
-#         #This is a dirty hack. Idk why this method can't handle byte images, and instead of looking deeper into it I'll just make do with this slightly slower version shown in the next line.
-#         return as_byte_image(_rgb_image_to_rgba_image(as_float_image(image)))
-#     assert not is_byte_image(image),'This function is currently broken for byte images! It adds too many dimensions to the shape'
-#     return np.concatenate((image,np.ones((*image.shape[:2],255 if is_byte_image(image) else 1),image.dtype)),2)#TODO TEST ME!!!
+        #This is a dirty hack. Idk why this method can't handle byte images, and instead of looking deeper into it I'll just make do with this slightly slower version shown in the next line.
+        return as_byte_image(_rgb_image_to_rgba_image(as_float_image(image)))
+    assert not is_byte_image(image),'This function is currently broken for byte images! It adds too many dimensions to the shape'
+    return np.concatenate((image,np.ones((*image.shape[:2],255 if is_byte_image(image) else 1),image.dtype)),2)#TODO TEST ME!!!
 
 def _rgba_image_to_grayscale_image     (image):return _rgb_image_to_grayscale_image(_rgba_image_to_rgb_image(image))
 def _rgba_image_to_rgb_image           (image):return as_numpy_array(image)[:,:,:3]
@@ -30439,27 +29904,19 @@ def _clamp_float_image(image):
     Take some floating image and make sure that it has no negative numbers or numbers >1
     """
     assert is_float_image(image)
-
-    #This is only faster to check because usually the range IS between 0 and 1
-    # if image.size: and (image.min()<0 or image.max()>1):
-
-    image = np.clip(image, 0, 1)
-
+    image=np.minimum(image,1)
+    image=np.maximum(image,0)
     return image
 
-def _float_image_dtype(): return np.float32
 def _float_image_to_float_image  (image):return image.copy()
-# def _float_image_to_byte_image   (image):return (np.asarray(_clamp_float_image(image),dtype=float)*255).astype(np.uint8) #May 13 2025: Why we convert float's dtype here? Seems redundant...
-def _float_image_to_byte_image   (image):return (_clamp_float_image(image)*255).astype(np.uint8)
+def _float_image_to_byte_image   (image):return (np.asarray(_clamp_float_image(image),dtype=float)*255).astype(np.uint8)
 def _float_image_to_binary_image (image):return np.round(_clamp_float_image(image)).astype(bool)
-def _byte_image_to_float_image   (image):return image.astype(_float_image_dtype())/255 #Since we're converting from bytes, we can use a lower precision float here
+def _byte_image_to_float_image   (image):return np.asarray(image,dtype=float)/255
 def _byte_image_to_byte_image    (image):return image.copy()
 def _byte_image_to_binary_image  (image):return _float_image_to_binary_image(_byte_image_to_float_image(image))
-def _binary_image_to_float_image (image):return np.asarray(image,dtype=_float_image_dtype())
+def _binary_image_to_float_image (image):return np.asarray(image,dtype=float)
 def _binary_image_to_byte_image  (image):return _float_image_to_byte_image(_binary_image_to_float_image(image))
 def _binary_image_to_binary_image(image):return image.copy()
-
-
 
 _channel_conversion_error_message='The given input image has an unrecognized dtype (there are no converters for it)'
 def as_float_image(image,*,copy=True):
@@ -30591,7 +30048,7 @@ def _images_conversion(func, images, *, copy_check ,copy=True):
                 return  images[...,:3].mean(3)
 
 
-        #TODO: Handle all edge cases of as_binary_images
+        #TODO: Handle all edge cases of as_rgb_images, as_rgba_images, as_binary_images
 
 
     #TODO: This can be optimized in the case that images is a numpy array by doing vectorized operations on it
@@ -32277,12 +31734,13 @@ def load_video_streams(
     transpose=False,
 
     show_progress=True,
-    num_threads=0, #Sometimes segfaulted when I did it this way...
+    use_cache=False,
+    num_threads=None,
     strict=True,
     lazy=False,
     buffer_limit=None
 ):
-    """ Plural of load_video_stream. If transpose==True, returns a single iterator that returns tuples of frames """
+    """ Plural of load_video_stream """
 
     paths = detuple(paths)
 
@@ -32298,9 +31756,9 @@ def load_video_streams(
     streams = gather_args_call(load_files, load, range(len(paths)))
         
     if transpose:
-        lengths = [(len(x) if hasattr(x, '__len__') else None) for x in streams]
-        
         streams = zip(*streams)
+
+        lengths = [(len(x) if hasattr(x, '__len__') else None) for x in streams]
 
         if all(isinstance(l, int) for l in lengths):
             length = min(lengths) #This is the way we handle it right now, might insert blank frames later
@@ -32308,7 +31766,6 @@ def load_video_streams(
             streams = IteratorWithLen(streams, length)
 
     return streams
-
 
 _load_video_cache = {}
 def load_video(path, *, start_frame=0, length=None, show_progress=True, use_cache=False):
@@ -32570,9 +32027,9 @@ class VideoWriterMP4:
 
 
         #Prepare the frame for the writer...
-        frame=rp.crop_image   (frame, self.height, self.width, copy=False)
-        frame=rp.as_rgb_image (frame, copy=False)
-        frame=rp.as_byte_image(frame, copy=False)
+        frame=rp.crop_image   (frame, self.height, self.width)
+        frame=rp.as_rgb_image (frame)
+        frame=rp.as_byte_image(frame)
 
         self.process.stdin.write(frame.tobytes())
 
@@ -32732,13 +32189,6 @@ def save_video_mp4(frames, path=None, framerate=60, *, video_bitrate='high', hei
         if height is None: height=max_height
         if width  is None: width =max_width 
     
-    # YES, this is faster, but it also means more memory...probably not the best thing to do right?
-    # #Speed improvement - batch-convert to uint8
-    # if is_numpy_array(frames) or isinstance(frames, list) or is_torch_tensor(frames):
-    #     frames = as_numpy_images(frames, copy=False)
-    #     frames = as_byte_images(frames, copy=False)
-    #     frames = as_rgb_images(frames, copy=False)
-
     writer = VideoWriterMP4(path, framerate, video_bitrate=video_bitrate, height=height, width=width, show_progress=show_progress)
 
     #Make frames speficiable as a glob, folder path, list of images, or list of image paths
@@ -34382,6 +33832,8 @@ def roll_image(image, dx=0, dy=0, interp='nearest'):
     image = np.roll(image, dx, 1)
     return image
 
+
+
 def crop_image(image, height: int = None, width: int = None, origin=None, copy=False):
     """
     Returns a cropped image to the specified width and height
@@ -34408,7 +33860,7 @@ def crop_image(image, height: int = None, width: int = None, origin=None, copy=F
     if origin is None: origin = 'top left'
 
     assert is_image(image)
-    image = as_numpy_image(image, copy=copy)
+    image = as_numpy_image(image)
     image_width  = get_image_width (image)
     image_height = get_image_height(image)
     assert (image_height, image_width) == image.shape[:2]
@@ -34429,9 +33881,12 @@ def crop_image(image, height: int = None, width: int = None, origin=None, copy=F
     if not any(get_image_dimensions(image)):
         #Handle cropping images that have height or width==0, allowing for zero-padding
         #Todo: This can probably be more elegant, but whatever...
-        if is_grayscale_image(image): return np.zeros((height,width  )).astype(image.dtype)
-        if is_rgb_image      (image): return np.zeros((height,width,3)).astype(image.dtype)
-        if is_rgba_image     (image): return np.zeros((height,width,4)).astype(image.dtype)
+        if is_grayscale_image(image):
+            return np.zeros((height,width)).astype(image.dtype)
+        if is_rgb_image(image):
+            return np.zeros((height,width,3)).astype(image.dtype)
+        if is_rgba_image(image):
+            return np.zeros((height,width,4)).astype(image.dtype)
 
     origins=['top left','center','bottom right'] #TODO: Possibly add more origins
     assert origin in origins,'Invalid origin: %s. Please select from %s'%(repr(origin),repr(origins))
@@ -34468,8 +33923,6 @@ def crop_image(image, height: int = None, width: int = None, origin=None, copy=F
     out[:common_height,:common_width]+=image[:common_height,:common_width]
     
     return out
-
-
 
 def crop_images(images, height:int = None, width:int=None, origin='top left', *, show_progress=False, lazy=False):
     output = (crop_image(image, height=height, width=width, origin=origin) for image in images)
@@ -36142,7 +35595,7 @@ def _get_visible_scope(frames_back=0):
 _all_module_names=set()
 def get_all_importable_module_names(use_cache=True):
     """
-    Returns a set of all known names that you can use 'import <name>' on
+    Returns a set of all names that you can use 'import <name>' on
     """
     if use_cache and _all_module_names:
         return _all_module_names
@@ -36151,13 +35604,7 @@ def get_all_importable_module_names(use_cache=True):
         _all_module_names.add(name)
     for name in sys.builtin_module_names:
         _all_module_names.add(name)
-    for module in sys.modules.values():
-        #Things like numpy.random don't always show up easily, but they do when they're already imported
-        if hasattr(module, '__name__'):
-            name = module.__name__
-            _all_module_names.add(name)
     return _all_module_names
-
 
 def get_module_path_from_name(module_name):
     """
@@ -36696,7 +36143,6 @@ class _MaybeTemporarilyDownloadVideo:
             except FileNotFoundError:
                 pass
 
-
 def download_url_to_cache(url, cache_dir=None, skip_existing=True, hash_func=None, show_progress=False, timeout=None):
     """
     Like download_url, except you only specify the output diectory - the filename will be chosen for you based on hashing the url.
@@ -36735,10 +36181,6 @@ def download_url_to_cache(url, cache_dir=None, skip_existing=True, hash_func=Non
                 url,
                 cache_path,
             )
-        return cache_path
-    elif folder_exists(url):
-        if not skip_existing or not folder_exists(cache_path):
-            copy_directory(url, cache_path, extract=False, follow_symlinks=False)
         return cache_path
     else:
         raise ValueError("rp.download_url_to_cache: url=%s is neither a valid url nor an existing path"%url)
@@ -37925,7 +37367,7 @@ def _set_ryan_vimrc(confirm=False):
         """
     )
 
-    packages = 'isort black-macchiato pyflakes removestar ropevim drawille pudb pynvim'.split()
+    packages = 'isort black-macchiato pyflakes removestar ropevim drawille pudb'.split()
 
     for package in packages:
         try:
@@ -37965,42 +37407,6 @@ def _sort_imports_via_isort(code):
     import isort
     return isort.code(code)
 sort_imports_via_isort = _sort_imports_via_isort
-
-def clean_imports_via_unimport(code: str) -> str:
-    """
-    Removes dead imports
-
-    EXAMPLE:
-        >>> code = "import numpy\nprint(123)"
-        >>> print(code)
-        import numpy
-        print(123)
-        >>> print(clean_imports_via_unimport(code))
-        print(123)
-    """
-    pip_import('unimport')
-    
-    import unimport
-    from unimport.analyzers.main import MainAnalyzer
-    from unimport.statement import Import
-    import unimport.refactor
-
-    analyzer = MainAnalyzer(source=code)
-    
-    # Analyze the code to find unused imports
-    analyzer.traverse()
-    
-    # Get unused imports
-    unused_imports = list(Import.get_unused_imports())
-    
-    # Remove unused imports from the code
-    result = unimport.refactor.refactor_string(source=code, unused_imports=unused_imports)
-    
-    # Clean up
-    analyzer.clear()
-    
-    return result
-
 
 _ryan_tmux_conf=r'''
 #Ryan Burgert's Tmux config
@@ -38642,13 +38048,13 @@ def _run_claude_code(code):
     if not isinstance(code, str):
         try:
             code = get_source_code(code)
-        except Exception:
-            code = str(code)
+        except:
+            pass
 
-    filetype = 'bash' if code.startswith('!') else 'py'
+    filetype = 'bash' if code.startswith('!') else 'python'
     filename = "editme." + filetype
 
-    display_code_cell(code, title=" Claude " + filename + " ", language=filetype)
+    display_code_cell(code, title=" Claude " + filename + " ")
     workdir = path_join(_claudecode_folder, 'workspace_%i'%millis())
     make_directory(workdir)
 
@@ -38736,10 +38142,6 @@ def get_port_is_taken(port: int) -> bool:
             return False  # If bind is successful, port is free
         except socket.error:
             return True  # If bind fails, port is likely in use
-        except OverflowError:
-            # ERROR: OverflowError: bind(): port must be 0-65535.
-            return False
-
 
 def get_next_free_port(port):
     """
@@ -38845,31 +38247,6 @@ def get_process_using_port(port: int, *, strict = True):
     else:
         return None
 
-def compress_bytes(data: bytes) -> bytes:
-    """
-    Compress bytes data.
-    
-    Args:
-        data: The input bytes to compress
-        
-    Returns:
-        Compressed bytes
-    """
-    import zlib
-    return zlib.compress(data)
-
-def decompress_bytes(compressed_data: bytes) -> bytes:
-    """
-    Decompress bytes data.
-    
-    Args:
-        compressed_data: The compressed bytes to decompress
-        
-    Returns:
-        Original bytes
-    """
-    import zlib
-    return zlib.decompress(compressed_data)
 
 def can_convert_object_to_bytes(x:object)->bool:
     """
@@ -38879,11 +38256,6 @@ def can_convert_object_to_bytes(x:object)->bool:
     dill=pip_import('dill')
     return dill.pickles(x)#https://stackoverflow.com/questions/17872056/how-to-check-if-an-object-is-pickleable
 
-def _dill_dumps(x):
-    pip_import('dill')
-    import dill
-    return dill.dumps(x)
-
 def object_to_bytes(x:object)->bytes:
     """
     Try to somehow turn x into a bytestring. 
@@ -38892,74 +38264,25 @@ def object_to_bytes(x:object)->bytes:
     However it works is a black box, as long as it can be decoded by the bytes_to_object function
     """
     # assert can_convert_object_to_bytes(x),'Sorry, but we cannot serialize this object to a bytestring'
-    output = _dill_dumps(x)
-    output = compress_bytes(output)
-    return output
-
-def object_to_base64(x):
-    return bytes_to_base64(object_to_bytes(x))
-
-def base64_to_object(x):
-    return bytes_to_object(base64_to_bytes(x))
+    dill=pip_import('dill')
+    return dill.dumps(x)
 
 def bytes_to_object(x:bytes)->object:
     """ Inverse of object_to_bytes, see object_to_bytes for more documentation """
     dill=pip_import('dill')
     try:
-        return dill.loads(decompress_bytes(x))
+        return dill.loads(x)
     except Exception:
         return x #bytestrings allready are objects. In the event that we have an error, it might make sense just to return the original bytestring
 
 _web_clipboard_url = 'https://ryanpythonide.pythonanywhere.com'#By sqrtryan@gmail.com account
-
-class _WebCopyProgressTracker:
-    """Tracks progress for web copy data uploads"""
-    def __init__(self, data, callback):
-        self.bytes_read = 0
-        self.total_size = len(data)
-        self.callback = callback
-        self.data = data
-        
-    def update(self, bytes_count):
-        self.bytes_read += bytes_count
-        self.callback(self.bytes_read)
-        return self.bytes_read
-        
-    def read(self, size=-1):
-        if size == -1:
-            size = len(self.data) - self.bytes_read
-        
-        chunk = self.data[self.bytes_read:self.bytes_read + size]
-        self.update(len(chunk))
-        return chunk
-
-def _web_copy(data:object, *, show_progress=False)->None:
-    """ Make the request for web-copying. Can also upload arbitrary HTML pages. """
-    assert connected_to_internet(),"Can't connect to the internet"
-    assert isinstance(data, bytes)
-
-    pip_import('requests')
-    import requests
-    from io import BytesIO
-    
-    if show_progress:
-        display_progress = _eta(len(data), title="Web Copy", min_interval=1/60)
-        
-        # Create a tracker that will monitor the upload progress
-        new_data = _WebCopyProgressTracker(data, display_progress)
-        if is_iterable(new_data):
-            data = new_data #3.5-friendly
-        
-    response = requests.post(_web_clipboard_url, data=data)
-
-    assert response.status_code==200,'Got bad status code that wasnt 200: '+str(response.status_code)
-    return response
-
-def web_copy(data:object, *, show_progress=False)->None:
+def web_copy(data:object)->None:
     """ Send an object to RyanPython's server's clipboard """
     assert connected_to_internet(),"Can't connect to the internet"
-
-    response=_web_copy(object_to_bytes(data), show_progress=show_progress)
+    # assert can_convert_object_to_bytes(data),'rp.web_copy error: Cannot turn the given object into a bytestring! Maybe this type isnt supported? See can_convert_object_to_bytes for more help. The type of object you gave: '+repr(type(data))
+    pip_import('requests')
+    import requests
+    response=requests.post(_web_clipboard_url,data=object_to_bytes(data))
     assert response.status_code==200,'Got bad status code that wasnt 200: '+str(response.status_code)
 
 def web_paste():
@@ -39632,8 +38955,6 @@ def _extract_code_cells_from_ipynb(notebook_path=None):
     if notebook_path is None:
         notebook_path = input_select_file(file_extension_filter='ipynb')
 
-    notebook_path = os.path.expanduser(notebook_path)
-
     # Validate path exists
     if not path_exists(notebook_path):
         raise ValueError("Notebook path does not exist: "+str(notebook_path))
@@ -39950,32 +39271,25 @@ def visualize_pytorch_model(model,*,input_shape=None, example_input=None, supres
             # display_image(load_image(output_path),block=block) #We would use this line if we wanted to rasterize it. However, a PDF is probably the best option
             open_file_with_default_application(output_path)# If we're making a pdf, open it in some pdf viewer
 
-
-def get_sinusoidal_positional_encodings(shape, channels, scale=10000.0):
+def get_sinusoidal_positional_encodings(length: int, dim: int, scale: float = 10000.0) -> np.ndarray:
     """
     Generate sinusoidal position encodings for transformer models.
     
     Parameters:
-        shape: int or list/tuple of ints
-            Length of the sequence for 1D encoding, or spatial dimensions for multi-dimensional encoding.
-        channels: int or list/tuple of ints
-            Dimension of the model (embedding dimension) for 1D encoding, or embedding dimensions per
-            spatial dimension for multi-dimensional encoding.
-        scale: float or list/tuple of floats, optional
-            Scaling factor for the frequencies, by default 10000.0¹. Can be specified per dimension.
+        length: int
+            Length of the sequence.
+        dim: int
+            Dimension of the model (embedding dimension).
+        scale: float, optional
+            Scaling factor for the frequencies, by default 10000.0¹
     
     Returns:
         np.ndarray
-            Position encoding matrix. For 1D encoding, shape will be (shape, channels).
-            For multi-dimensional encoding, shape will be (*shape, sum(channels)).
+            Position encoding matrix of shape (length, dim).
     
     Notes:
         The position encoding uses sine for even indices and cosine for odd indices
         in the embedding dimension, with frequencies decreasing as the dimension increases.
-        
-        For multi-dimensional inputs, positional encodings are created separately for each dimension
-        and then concatenated along the channel dimension. This allows different encoding parameters
-        per dimension.
         
         ¹ The value 10000 comes from the original "Attention is All You Need" paper by 
         Vaswani et al. (2017), Section 3.5 "Positional Encoding", page 6. The paper 
@@ -39987,22 +39301,28 @@ def get_sinusoidal_positional_encodings(shape, channels, scale=10000.0):
         implementations. Paper link: https://arxiv.org/pdf/1706.03762.pdf
     
     EXAMPLES:
-
+        >>> encoding = get_position_encoding(length=4, dim=6)
+        >>> encoding.shape
+        (4, 6)
+        >>> encoding = get_position_encoding(length=10, dim=512)
+        >>> encoding.shape
+        (10, 512)
+        
         >>> #---------------------------
-        ... # VISUALIZATION EXAMPLE
+        ... # EXAMPLES
         ... #---------------------------
         ... import numpy as np
         ... import matplotlib.pyplot as plt
         ... from typing import Tuple
         ...
         ... # Example 1: Generate and print a small position encoding matrix
-        ... P = get_sinusoidal_positional_encodings(shape=4, channels=4, scale=100)
+        ... P = get_sinusoidal_positional_encodings(length=4, dim=4, scale=100)
         ... print("Position encoding matrix (4×4):")
         ... print(P)
         ... print("Shape: %s" % str(P.shape))
-        ...
+        ... 
         ... # Example 2: Visualize a larger position encoding matrix
-        ... P_large = get_sinusoidal_positional_encodings(shape=256, channels=128)
+        ... P_large = get_sinusoidal_positional_encodings(length=20, dim=64)
         ... plt.figure(figsize=(10, 8))
         ... plt.imshow(P_large, cmap='viridis', aspect='auto')
         ... plt.colorbar()
@@ -40011,155 +39331,31 @@ def get_sinusoidal_positional_encodings(shape, channels, scale=10000.0):
         ... plt.ylabel("Sequence Position")
         ... plt.savefig("position_encoding_heatmap.png")
         ... plt.show()  # Uncomment to display the plot
-
-        >>> #BASIC USAGE
-        >>> encoding = get_position_encoding(shape=4, channels=6)
-        >>> encoding.shape
-        (4, 6)
-        >>> encoding = get_position_encoding(shape=10, channels=512)
-        >>> encoding.shape
-        (10, 512)
-        
-        >>> #INPUT --> SHAPE DEMOS:
-        >>> print(get_sinusoidal_positional_encodings((10,10,5),[17])            .shape)#   -->   (10, 10, 5, 51)
-        >>> print(get_sinusoidal_positional_encodings((10,10,5),17)              .shape)#   -->   (10, 10, 5, 51)
-        >>> print(get_sinusoidal_positional_encodings(10,17)                     .shape)#   -->   (10, 17)
-        >>> print(get_sinusoidal_positional_encodings([10],17)                   .shape)#   -->   (10, 17)
-        >>> print(get_sinusoidal_positional_encodings([10,20],17)                .shape)#   -->   (10, 20, 34)
-        >>> print(get_sinusoidal_positional_encodings([10,20],[17,1])            .shape)#   -->   (10, 20, 18)
-        >>> print(get_sinusoidal_positional_encodings([10,20],[17,1],[1])        .shape)#   -->   (10, 20, 18)
-        >>> print(get_sinusoidal_positional_encodings([10,20],[17,1],[1,2])      .shape)#   -->   (10, 20, 18)
-        >>> print(get_sinusoidal_positional_encodings([10,20],[17,1],[1,2,3])    .shape)#   -->   ERROR: ValueError: Error: All lists must have the same length or be scalars. Lengths provided: [2, 2, 3]
-        >>> print(get_sinusoidal_positional_encodings([10,20],[17,1,4],[1,2])    .shape)#   -->   ERROR: ValueError: Error: All lists must have the same length or be scalars. Lengths provided: [2, 3, 3]
-        >>> print(get_sinusoidal_positional_encodings([10,20,5],[17,1,4],[1,2,3]).shape)#   -->   (10, 20, 5, 22)
-        >>> print(get_sinusoidal_positional_encodings([10],[17,1,4],[1,2,3])     .shape)#   -->   (10, 10, 10, 22)
-        >>> print(get_sinusoidal_positional_encodings(10,[17,1,4],[1,2,3])       .shape)#   -->   ERROR: ValueError: channels must be a positive integer, got [17, 1, 4]
-
-        >>> def demo_encoding_similarity(channels=256, scale=10000):
-        ...     '''
-        ...     This demo shows how channels and scale affect similaity values
-        ...     Play around with it, generating different videos!
-        ...     As channels --> Infinity, the distance function becomes super smooth
-        ...     It nicely shows how the cosine similarity is equivariant to the query point
-        ...     This also shows why fourier features don't use just 2 axes...the similaity is so strongly aligned with the axes...
-        ...     Note: Best to run this locally on a macbook so you can preview the animation as its calculated
-        ...     '''
-        ...     import math
-        ... 
-        ...     def get_video():
-        ...         encodings = get_sinusoidal_positional_encodings([512, 512], channels, scale)
-        ...         encodings = encodings.astype(np.float32)
-        ...         # display_video(video_with_progress_bar(full_range(encodings).transpose(2,0,1)),framerate=20,loop=True)
-        ... 
-        ...         coordinate = [64, 64]  # No longer...
-        ... 
-        ...         angles = range(360)
-        ...         coordinates = [
-        ...             (round(256 + 205 * math.cos(angle)), round(256 + 205 * math.sin(angle)))
-        ...             for angle in [angle * 2 * math.pi / 360 for angle in angles]
-        ...         ]
-        ... 
-        ...         for coordinate in eta(coordinates):
-        ...             x, y = coordinate
-        ...             encoding = encodings[y, x]
-        ...             similarity = (encoding[None, None, :] * encodings).sum(-1)
-        ...             similarity_image = full_range(similarity)
-        ...             similarity_image = apply_colormap_to_image(similarity_image, "jet")
-        ...             similarity_image = cv_draw_circle(similarity_image, x, y, rim=2)
-        ...             similarity_image = labeled_image(
-        ...                 similarity_image, f"Embedding Similaity: x={x} y={y}", font="R:Futura"
-        ...             )
-        ...             yield similarity_image
-        ... 
-        ...     display_video(get_video(), loop=True)
-        ... 
-        ... 
-        ... demo_encoding_similarity()
     """
-    
-    #---------------------------
-    # MULTIDIMENSIONAL HANDLING
-    #---------------------------
-    if is_iterable(shape):
-        #---------------------------
-        # BROADCASTING
-        #---------------------------
-        #Optionally us to specify channels and scale on a per-dimension basis
-        if is_iterable(channels): channels = list(channels)
-        if is_iterable(scale   ): scale    = list(scale   )
-        shape = list(shape)
-        shape, channels, scale = broadcast_lists(shape, channels, scale)
-        shape = tuple(shape)
-    
-        #---------------------------
-        # INPUT VALIDATION
-        #---------------------------
-        if not all(isinstance(size, int) and size > 0 for size in shape):
-            raise ValueError("given shape must have all positive ints, but got %s" % shape)
-        
-        if not all(isinstance(chan, int) and chan > 0 for chan in channels):
-            raise ValueError("given channels must all be positive ints, but got %s" % shape)
-
-        #---------------------------
-        # CALCULATE RESULT
-        #---------------------------
-        encodings = [get_sinusoidal_positional_encodings(shap, chan, scal) for (shap,chan,scal) in zip(shape,channels,scale)]
-        
-        # For a shape like (H, W), create positional encodings with shape (H, W, 2*channels)
-        result = None
-        for i, (enc, chan) in enumerate(zip(encodings,channels)):
-            # Create the shape for reshaping: [1, 1, ..., size_i, ..., 1, channels]
-            reshape_shape = [1] * len(shape) + [chan]
-            reshape_shape[i] = shape[i]
-            
-            # Create the tile repeats: [H, W, ..., 1] with a 1 at position i
-            tile_shape = list(shape)
-            tile_shape[i] = 1
-            
-            # Reshape and tile/repeat
-            reshaped = enc.reshape(reshape_shape)
-            tiled = np.tile(reshaped, tile_shape + [1])
-            
-            # Add to result
-            if result is None:
-                result = tiled
-            else:
-                result = np.concatenate([result, tiled], axis=-1)
-
-        assert result.shape == (*shape, sum(channels))
-        
-        return result
 
     #---------------------------
     # INPUT VALIDATION
     #---------------------------
-    if not isinstance(shape, int) or shape <= 0:
-        raise ValueError("shape must be a positive integer, got %s" % shape)
+    if not isinstance(length, int) or length <= 0:
+        raise ValueError("length must be a positive integer, got %s" % length)
     
-    if not isinstance(channels, int) or channels <= 0:
-        raise ValueError("channels must be a positive integer, got %s" % channels)
+    if not isinstance(dim, int) or dim <= 0:
+        raise ValueError("dim must be a positive integer, got %s" % dim)
     
-
-    #---------------------------
-    # SPECIAL CASE: ODD CHANNELS
-    #---------------------------
-    if channels % 2 != 0:
-        # If the given number of channels is odd, calculate with one extra channel then clip it off
-        position_encoding = get_sinusoidal_positional_encodings(shape, channels + 1, scale)[:, :channels]
-        assert position_encoding.shape == (shape, channels)
-        return position_encoding
+    if dim % 2 != 0:
+        raise ValueError("dim must be even, got %s" % dim)
     
 
     #---------------------------
     # POSITION ENCODING CALCULATION
     #---------------------------
     # Initialize position encoding matrix
-    position_encoding = np.zeros((shape, channels))
+    position_encoding = np.zeros((length, dim))
     
     # Generate position encodings
-    for pos in range(shape):
-        for i in range(channels // 2):
-            denominator = scale ** (2 * i / channels)
+    for pos in range(length):
+        for i in range(dim // 2):
+            denominator = scale ** (2 * i / dim)
             position_encoding[pos, 2 * i] = np.sin(pos / denominator)
             position_encoding[pos, 2 * i + 1] = np.cos(pos / denominator)
     
@@ -40167,9 +39363,11 @@ def get_sinusoidal_positional_encodings(shape, channels, scale=10000.0):
     #---------------------------
     # OUTPUT VALIDATION
     #---------------------------
-    assert position_encoding.shape == (shape, channels)
+    assert position_encoding.shape == (length, dim)
     
     return position_encoding
+
+
 
 
 #def _visualize_pytorch_model_via_torchviz(model,*,input_shape=None, example_input=None):
@@ -40239,7 +39437,7 @@ def inverted_color(color):
     else:
         raise TypeError('Unknown color format: '+repr(color))
 
-def inverted_image(image, invert_alpha=False):
+def inverted_image(image,invert_alpha=False):
     """ Inverts the colors of an image. By default, it doesn't touch the alpha channel (if one exists) """
     assert is_image(image)
     image=image.copy()
@@ -40258,13 +39456,6 @@ def inverted_image(image, invert_alpha=False):
         elif is_binary_image(image):
             image=~image
     return image
-invert_image = inverted_image
-
-def inverted_images(images, invert_alpha=False):
-    if is_numpy_array(images):
-        return as_numpy_array(gather_args_call(inverted_images, list(images)))
-    return [gather_args_call(inverted_image, image) for image in images]
-invert_images = inverted_images
 
 def make_zip_file_from_folder(src_folder:str=None, dst_zip_file:str=None)->str:
     """
@@ -41431,14 +40622,6 @@ def bytes_to_base64(bytestring: bytes) -> str:
 def base64_to_bytes(base64_string: str) -> bytes:
     import base64
     return base64.b64decode(base64_string)
-    
-def bytes_to_base16(bytestring: bytes) -> str:
-    import binascii
-    return binascii.hexlify(bytestring).decode('utf-8')
-
-def base16_to_bytes(base16_string: str) -> bytes:
-    import binascii
-    return binascii.unhexlify(base16_string)
 
 def func_call_to_shell_command(func, *args, **kwargs):
     """
@@ -41782,7 +40965,7 @@ def _prepare_cv_image(image):
         image = as_numpy_image(image)
     elif is_float_image(image):
         #Float16 is no good
-        image = image.astype(_float_image_dtype())
+        image = image.astype(float)
 
     return image
     
@@ -42317,14 +41500,12 @@ def get_identity_uv_map(height=256,width=256,uv_form='xy'):
 
     return output
 
-def validate_tensor_shapes(return_dims=None, *, verbose=False, **kwargs):
+def validate_tensor_shapes(*, verbose=False, **kwargs):
     """
     Validates that tensor dimensions match expected shapes and extracts dimension values.
     Reads the tensors from the caller's scope using the variable names found in kwargs.
     
     Args:
-        return_dims: String of space-separated dimension names to return (e.g., "H W"). 
-                    If provided, only returns the specified dimensions instead of all validated dimensions.
         verbose: Boolean, if True suppresses shape information printing (default: True)
         **kwargs: Either tensor variables with form strings (e.g., image="H W C") 
                  or manual dimension specifications (e.g., C=3)
@@ -42450,7 +41631,7 @@ def validate_tensor_shapes(return_dims=None, *, verbose=False, **kwargs):
     """
     def format_shape(shape):
         return ','.join(map(str, shape))
-    
+
     # Get the caller's scope to find tensor variables
     caller_scope = _get_visible_scope(1)
     
@@ -42655,13 +41836,8 @@ def validate_tensor_shapes(return_dims=None, *, verbose=False, **kwargs):
             print(report_string)
 
     dims = as_easydict(dims)
-    
-    if return_dims:
-        assert isinstance(return_dims, str), type(return_dims)
-        return_dims = return_dims.split()
-        dims = gather(dims, return_dims)
-
     return dims
+
 
 
 def _test_validate_tensor_shapes():
@@ -42776,85 +41952,85 @@ def _round(x):
 def _sin(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.sin(x)
-    if is_torch_tensor(x):return __import__('torch').sin(x)
+    if is_torch_tensor(x):return torch.sin(x)
     return math.sin(x)
 
 def _cos(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.cos(x)
-    if is_torch_tensor(x):return __import__('torch').cos(x)
+    if is_torch_tensor(x):return torch.cos(x)
     return math.cos(x)
 
 def _tan(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.tan(x)
-    if is_torch_tensor(x):return __import__('torch').tan(x)
+    if is_torch_tensor(x):return torch.tan(x)
     return math.tan(x)
 
 def _exp(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.exp(x)
-    if is_torch_tensor(x):return __import__('torch').exp(x)
+    if is_torch_tensor(x):return torch.exp(x)
     return math.exp(x)
 
 def _log(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.log(x)
-    if is_torch_tensor(x):return __import__('torch').log(x)
+    if is_torch_tensor(x):return torch.log(x)
     return math.log(x)
 
 def _log10(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.log10(x)
-    if is_torch_tensor(x):return __import__('torch').log10(x)
+    if is_torch_tensor(x):return torch.log10(x)
     return math.log10(x)
 
 def _sqrt(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.sqrt(x)
-    if is_torch_tensor(x):return __import__('torch').sqrt(x)
+    if is_torch_tensor(x):return torch.sqrt(x)
     return math.sqrt(x)
 
 def _abs(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.abs(x)
-    if is_torch_tensor(x):return __import__('torch').abs(x)
+    if is_torch_tensor(x):return torch.abs(x)
     return abs(x)
 
 def _pow(x, y):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.power(x, y)
-    if is_torch_tensor(x):return __import__('torch').pow(x, y)
+    if is_torch_tensor(x):return torch.pow(x, y)
     return math.pow(x, y)
 
 def _fft(x):
     """ works across libraries - such as numpy, torch """
     if is_numpy_array (x):return np.fft.fft(x)
-    if is_torch_tensor(x):return __import__('torch').fft.fft(x)
+    if is_torch_tensor(x):return torch.fft.fft(x)
     raise ValueError("FFT not available for Python scalars")
 
 def _ifft(x):
     """ works across libraries - such as numpy, torch """
     if is_numpy_array (x):return np.fft.ifft(x)
-    if is_torch_tensor(x):return __import__('torch').fft.ifft(x)
+    if is_torch_tensor(x):return torch.fft.ifft(x)
     raise ValueError("IFFT not available for Python scalars")
 
 def _tanh(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.tanh(x)
-    if is_torch_tensor(x):return __import__('torch').tanh(x)
+    if is_torch_tensor(x):return torch.tanh(x)
     return math.tanh(x)
 
 def _sigmoid(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return 1 / (1 + np.exp(-x))
-    if is_torch_tensor(x):return __import__('torch').sigmoid(x)
+    if is_torch_tensor(x):return torch.sigmoid(x)
     return 1 / (1 + math.exp(-x))
 
 def _relu(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.maximum(0, x)
-    if is_torch_tensor(x):return __import__('torch').relu(x)
+    if is_torch_tensor(x):return torch.relu(x)
     return max(0, x)
 
 def _softmax(x, dim=-1):
@@ -42862,44 +42038,38 @@ def _softmax(x, dim=-1):
     if is_numpy_array (x):
         e_x = np.exp(x - np.max(x, axis=dim, keepdims=True))
         return e_x / e_x.sum(axis=dim, keepdims=True)
-    if is_torch_tensor(x):return __import__('torch').softmax(x, dim=dim)
+    if is_torch_tensor(x):return torch.softmax(x, dim=dim)
     raise ValueError("Softmax not applicable for Python scalars")
 
 def _log2(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.log2(x)
-    if is_torch_tensor(x):return __import__('torch').log2(x)
+    if is_torch_tensor(x):return torch.log2(x)
     return math.log2(x)
 
 def _asin(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.arcsin(x)
-    if is_torch_tensor(x):return __import__('torch').asin(x)
+    if is_torch_tensor(x):return torch.asin(x)
     return math.asin(x)
 
 def _acos(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.arccos(x)
-    if is_torch_tensor(x):return __import__('torch').acos(x)
+    if is_torch_tensor(x):return torch.acos(x)
     return math.acos(x)
 
 def _atan(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.arctan(x)
-    if is_torch_tensor(x):return __import__('torch').atan(x)
+    if is_torch_tensor(x):return torch.atan(x)
     return math.atan(x)
 
 def _clip(x, min_val, max_val):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.clip(x, min_val, max_val)
-    if is_torch_tensor(x):return __import__('torch').clamp(x, min_val, max_val)
+    if is_torch_tensor(x):return torch.clamp(x, min_val, max_val)
     return max(min_val, min(max_val, x))
-
-def _nan_to_num(x):
-    """ works across libraries - such as numpy, torch, pure python """
-    if is_numpy_array (x):return np.nan_to_num(x)
-    if is_torch_tensor(x):return __import__('torch').nan_to_num(x)
-    return math.atan(x)
 
 # Alias for _clip
 def _clamp(x, min_val, max_val):
@@ -42908,37 +42078,37 @@ def _clamp(x, min_val, max_val):
 def _atan2(y, x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (y):return np.arctan2(y, x)
-    if is_torch_tensor(y):return __import__('torch').atan2(y, x)
+    if is_torch_tensor(y):return torch.atan2(y, x)
     return math.atan2(y, x)
 
 def _sinh(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.sinh(x)
-    if is_torch_tensor(x):return __import__('torch').sinh(x)
+    if is_torch_tensor(x):return torch.sinh(x)
     return math.sinh(x)
 
 def _cosh(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.cosh(x)
-    if is_torch_tensor(x):return __import__('torch').cosh(x)
+    if is_torch_tensor(x):return torch.cosh(x)
     return math.cosh(x)
 
 def _sign(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.sign(x)
-    if is_torch_tensor(x):return __import__('torch').sign(x)
+    if is_torch_tensor(x):return torch.sign(x)
     return -1 if x < 0 else (1 if x > 0 else 0)
 
 def _degrees(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.degrees(x)
-    if is_torch_tensor(x):return __import__('torch').rad2deg(x)
+    if is_torch_tensor(x):return torch.rad2deg(x)
     return math.degrees(x)
 
 def _radians(x):
     """ works across libraries - such as numpy, torch, pure python """
     if is_numpy_array (x):return np.radians(x)
-    if is_torch_tensor(x):return __import__('torch').deg2rad(x)
+    if is_torch_tensor(x):return torch.deg2rad(x)
     return math.radians(x)
 
 def _create_array_like(x, *, func_name, shape=None, dtype=None):
@@ -44014,17 +43184,17 @@ def resize_images_to_min_size(*images, interp="bilinear", alpha_weighted=False):
     """
     return resize_images(*images, size=get_min_image_dimensions(*images), interp=interp, alpha_weighted=alpha_weighted)
 
-def resize_videos_to_min_size(*videos,interp='auto'):
+def resize_videos_to_min_size(*videos):
     videos = detuple(videos)
     min_height = min(get_video_heights(videos))
     min_width  = min(get_video_widths (videos))
-    return resize_videos(videos, size=(min_height, min_width),interp=interp)
+    return resize_videos(videos, size=(min_height, min_width))
 
-def resize_videos_to_max_size(*videos,interp='auto'):
+def resize_videos_to_max_size(*videos):
     videos = detuple(videos)
     max_height = max(get_video_heights(videos))
     max_width  = max(get_video_widths (videos))
-    return resize_videos(videos, size=(max_height, max_width),interp=interp)
+    return resize_videos(videos, size=(max_height, max_width))
 
 def _iterfzf(iterable, *args,**kwargs):
     pip_import('iterfzf')
@@ -45342,14 +44512,14 @@ def web_paste_path(path=None,*,ask_to_replace=True):
                     delete_file(temp_zip)
     return path
 
-def web_copy_path(path:str=None, *, show_progress=False):
+def web_copy_path(path:str=None):
     """ FC (file copy) """
     if path is None:
         path=input_select_path(message='Select a file or folder for web_copy_path:')
         path=get_relative_path(path)
     assert path_exists(path),'Path does not exist: '+str(path)
     data=file_to_bytes(path) if is_a_file(path) else zip_folder_to_bytes(path)
-    web_copy(object_to_bytes(_BundledPath(is_a_file(path),data,path)), show_progress=show_progress)
+    web_copy(object_to_bytes(_BundledPath(is_a_file(path),data,path)))
     return path
 
 def get_all_local_ip_addresses():
@@ -47827,11 +46997,6 @@ def as_torch_images(images, *, device=None, dtype=None, copy=False):
         assert len(images.shape)!=3,'Grayscale images are not yet supported'
 
         images=images.transpose(0,3,1,2)
-
-        if device=='mps' and dtype in [None, torch.float64]:
-            # TypeError: Cannot convert a MPS Tensor to float64 dtype as the MPS framework doesn't support float64. Please use float32 instead.
-            dtype=torch.float32 
-
         images=torch.tensor(images, device=device, dtype=dtype)
         return images
 
@@ -47859,45 +47024,27 @@ def as_torch_image(image, *, device=None, dtype=None, copy=False):
         assert False,'Unsupported image type: '+str(type(image))
 
 _load_safetensors_cache={}
-def load_safetensors(path, device="cpu", *, show_progress=False, verbose=False, use_cache=False, keys_only=False, metadata=False):
+def load_safetensors(path, device="cpu", *, show_progress=False, verbose=False, use_cache=False):
     """
     Loads tensors from a .safetensors file.
 
     Args:
-        path (str): Path to .safetensors file, or a glob for safetensor files, or a list of files
+        path (str): Path to .safetensors file.
         device (str, optional): Device (cpu, cuda, etc.). Defaults to 'cpu'.
         show_progress (bool, optional): Show progress bar. Defaults to False.
         verbose (bool, optional): Print tensor names. Defaults to False.
-        keys_only (bool): If True, returns a list of key strings
-        metadata (bool): If True, returns (regular output, metadata)
-            where metadata is a dict of str -> str
 
     Returns:
-        easydict: Easydict of tensors, or if keys_only, a list of strings
+        easydict: Easydict of tensors.
         
     Reference: https://huggingface.co/docs/safetensors/en/index
-
-    EXAMPLE:
-        >>> LS
-        config.json
-        diffusion_pytorch_model-00001-of-00002.safetensors
-        diffusion_pytorch_model-00002-of-00002.safetensors
-        diffusion_pytorch_model.safetensors.index.json
-        >>> keys = load_safetensors('*.safetensors', keys_only=True)
-        >>> print(len(keys))
-        1024
-        >>> print(keys[:5])
-        ['patch_embed.proj.bias', 'patch_embed.proj.weight', 'patch_embed.text_proj.bias', 'patch_embed.text_proj.weight', 'time_embedding.linear_1.bias']
-        >>> state = load_safetensors('*.safetensors', keys_only=False)
-        >>> print(state[keys[0]].shape)
-        torch.Size([3072])
-
     """
+
     pip_import("safetensors")
     from safetensors import safe_open
 
     # Handle Cache
-    cache_key = handy_hash([path, device, keys_only, metadata])
+    cache_key = path, device
     cache = _load_safetensors_cache
     if use_cache:
         if cache_key not in cache:
@@ -47906,96 +47053,18 @@ def load_safetensors(path, device="cpu", *, show_progress=False, verbose=False, 
     elif cache_key in cache:
         del cache[cache_key]
 
-    #Handle globs/folders of shards
-    if not file_exists(path):
-        #Sometimes we have multiple shards like ckpt_001.safetensors, ckpt_002.safetensors etc
-
-        subpaths = rp_glob(path)
-        if not subpaths:
-            subpaths = rp_glob(get_absolute_path(path)) #Maybe replacing ~ with /home etc will help? 
-            if not subpaths:
-                #If we still can't find anything...raise an error.
-                raise FileNotFoundError('rp.load_safetensors: No safetensor files at '+str(path))
-
-        output_tensors, output_metadatas = list_transpose([gather_args_call(load_safetensors, subpath, metadata=True) for subpath in subpaths])
-        if keys_only:
-            tensors = list_flatten(output_tensors)
-        else:
-            tensors = merged_dicts(output_tensors)
-        meta = merged_dicts(output_metadatas)
-            
-    #Handle a single safetensors file
-    else:
-        # Load Safetensors file
-        with safe_open(path, framework="pt", device=device) as f:
-            keys = f.keys()
-            
-            if keys_only:
-                tensors = list(keys)
-            
-            else:
-                tensors = {}
-                if show_progress:
-                    keys = rp.eta(keys, title="rp.load_safetensors")
-                for k in keys:
-                    if verbose:
-                        print("    - " + str(k))
-                    tensors[k] = f.get_tensor(k)
-            
-                tensors = as_easydict(tensors)
-    
-            if metadata:
-                meta = f.metadata()
-                meta = as_easydict(meta)
-
-    if metadata:
-        return tensors, meta
-    else:
-        return tensors
-
-
-def save_safetensors(tensors, path, metadata=None, *, verbose=False):
-    """
-    Saves tensors to a .safetensors file.
-
-    Args:
-        tensors (dict or easydict): Dictionary of tensors to save (str -> tensor)
-        path (str): Path to save the .safetensors file
-        metadata (dict, optional): Metadata to include in the file. Defaults to None. (str -> str)
-
-    Returns:
-        str: Path to the saved file
-        
-    Reference: https://huggingface.co/docs/safetensors/en/index
-
-    EXAMPLE:
-        >>> tensors = {"weight": torch.randn(3, 4), "bias": torch.randn(4)}
-        >>> save_safetensors(tensors, "model.safetensors")
-        'model.safetensors'
-        >>> loaded = load_safetensors("model.safetensors")
-        >>> loaded.keys()
-        ['weight', 'bias']
-    """
-    import os
-    from rp.r import pip_import
-    pip_import("safetensors")
-    
-    from safetensors.torch import save_file
-    
-    # Convert to regular dict if it's an easydict
-    tensors = dict(tensors)
-    
-    if verbose:
-        print("Saving {0} tensors to {1}".format(len(tensors), path))
-        for k, v in tensors.items():
-            print("    - {0}: {1}".format(k, v.shape if hasattr(v, 'shape') else 'no shape'))
-    
-    make_parent_directory(path)
-    
-    # Save the tensors
-    save_file(tensors, path, metadata)
-    
-    return path
+    # Load Safetensors file
+    tensors = {}
+    with safe_open(path, framework="pt", device=device) as f:
+        keys = f.keys()
+        if show_progress:
+            keys = rp.eta(keys, title="rp.load_safetensors")
+        for k in f.keys():
+            if verbose:
+                print("    - " + str(k))
+            tensors[k] = f.get_tensor(k)
+    tensors = as_easydict(tensors)
+    return tensors
 
 
 class ImageDataset:
@@ -48375,18 +47444,13 @@ def get_cuda_visible_devices():
     key = 'CUDA_VISIBLE_DEVICES'
     if key in os.environ:
         out = os.environ[key]
-        if out:
-            output = ast.literal_eval(out)
-
-            if isinstance(output, int):
-                output = [output]
-
-            output = list(output)
-            
-            return output
+        if len(out.split(",")) > 1:
+            return list(ast.literal_eval(out))
+        else:
+            return [ast.literal_eval(out)]
     return []
 
-def run_removestar(code:str,max_line_length=100,quiet=False,qualify=False):
+def _removestar(code:str,max_line_length=100,quiet=False):
     """
     Takes something like:
        from numpy import *
@@ -48399,203 +47463,24 @@ def run_removestar(code:str,max_line_length=100,quiet=False,qualify=False):
        asarray([1,2,3])
        display_image(x)
     It removes the stars
-
-
-    EXAMPLE:
-        >>> code='''from rp import *
-        ... 
-        ... # 2025-03-11 02:24:15.105806
-        ... N = 300
-        ... image = load_image(
-        ...     "https://github.com/RyannDaGreat/Diffusion-Illusions/blob/gh-pages/images/emma.png?raw=true",
-        ...     use_cache=True,
-        ... )
-        ... 
-        ... colors = as_rgba_float_colors(
-        ...     "random blue" for _ in range(N)
-        ... )
-        ... rim_colors = as_rgba_float_colors("white randombw dark black randomgray" for _ in range(N))
-        ... y = random_ints(N, get_image_height(image) - 1)
-        ... x = random_ints(N, get_image_width(image) - 1)
-        ... radii = random_floats(N, 1, 30)
-        ... rims = random_floats(N, -10, 10)
-        ... 
-        ... display_image(cv_draw_circles(image, x, y, radii, colors, rims, rim_colors))
-        ... '''
-        ... display_code_cell(run_removestar(code,qualify=False),title='Without Qualify')
-        ... display_code_cell(run_removestar(code,qualify=True),title='With Qualify')
-        ... 
-        ... 
-        ...     ┌─────────────────────────────────────────Without Qualify──────────────────────────────────────────
-        ...    1│from rp import (as_rgba_float_colors, cv_draw_circles, display_image, get_image_height,
-        ...    2│                get_image_width, load_image, random_floats, random_ints)
-        ...    3│
-        ...    4│# 2025-03-11 02:24:15.105806
-        ...    5│N = 300
-        ...    6│image = load_image(
-        ...    7│    "https://github.com/RyannDaGreat/Diffusion-Illusions/blob/gh-pages/images/emma.png?raw=true",
-        ...    8│    use_cache=True,
-        ...    9│)
-        ...   10│
-        ...   11│colors = as_rgba_float_colors(
-        ...   12│    "random blue" for _ in range(N)
-        ...   13│)
-        ...   14│rim_colors = as_rgba_float_colors("white randombw dark black randomgray" for _ in range(N))
-        ...   15│y = random_ints(N, get_image_height(image) - 1)
-        ...   16│x = random_ints(N, get_image_width(image) - 1)
-        ...   17│radii = random_floats(N, 1, 30)
-        ...   18│rims = random_floats(N, -10, 10)
-        ...   19│
-        ...   20│display_image(cv_draw_circles(image, x, y, radii, colors, rims, rim_colors))
-        ... 
-        ... 
-        ...     ┌───────────────────────────────────────────With Qualify───────────────────────────────────────────
-        ...    1│import rp
-        ...    2│
-        ...    3│# 2025-03-11 02:24:15.105806
-        ...    4│N = 300
-        ...    5│image = rp.load_image(
-        ...    6│    "https://github.com/RyannDaGreat/Diffusion-Illusions/blob/gh-pages/images/emma.png?raw=true",
-        ...    7│    use_cache=True,
-        ...    8│)
-        ...    9│
-        ...   10│colors = rp.as_rgba_float_colors(
-        ...   11│    "random blue" for _ in range(N)
-        ...   12│)
-        ...   13│rim_colors = rp.as_rgba_float_colors("white randombw dark black randomgray" for _ in range(N))
-        ...   14│y = rp.random_ints(N, rp.get_image_height(image) - 1)
-        ...   15│x = rp.random_ints(N, rp.get_image_width(image) - 1)
-        ...   16│radii = rp.random_floats(N, 1, 30)
-        ...   17│rims = rp.random_floats(N, -10, 10)
-        ...   18│
-        ...   19│rp.display_image(rp.cv_draw_circles(image, x, y, radii, colors, rims, rim_colors))
     """
     pip_import('removestar')
-
-    if qualify:
-        modules = get_star_modules(code)
-        new_code = gather_args_call(run_removestar, qualify=False)
-        new_code = qualify_imports(new_code, modules)
-        return new_code
-
     from removestar.removestar import fix_code
     return fix_code(code,file='filename is irrelevant',max_line_length=max_line_length,quiet=True)
-_removestar = run_removestar
-
-def qualify_imports(code, *module_names):
-    """
-    EXAMPLE:
-        >>> code = '''
-        ... from numpy.random import randn
-        ... from rp import display_image
-        ... 
-        ... display_image(randn(512,512,3))
-        ... '''
-        ... display_code_cell(code)
-        ... display_code_cell(qualify_imports(code,'rp'))
-        ... display_code_cell(qualify_imports(code,'numpy.random'))
-        ... display_code_cell(qualify_imports(code,'rp','numpy.random'))
-        ... 
-        ... #   ┌───────────Code Cell────────────
-        ... #  1│from numpy.random import randn
-        ... #  2│from rp import display_image
-        ... #  3│
-        ... #  4│display_image(randn(512,512,3))
-        ...  
-        ... #   ┌──────────────Code Cell──────────────
-        ... #  1│from numpy.random import randn
-        ... #  2│import rp
-        ... #  3│rp.display_image(randn(512, 512, 3))
-        ...  
-        ... #   ┌───────────────────Code Cell───────────────────
-        ... #  1│import numpy.random
-        ... #  2│from rp import display_image
-        ... #  3│display_image(numpy.random.randn(512, 512, 3))
-        ...  
-        ... #   ┌───────────────────Code Cell───────────────────
-        ... #  1│import numpy.random
-        ... #  2│import rp
-        ... #  3│rp.display_image(numpy.random.randn(512, 512, 3))
-    """
-
-    module_names = detuple(module_names)
-
-    if isinstance(module_names, str):
-        module_names = [module_names]
-
-    for module_name in module_names:
-        code = _qualify_imports(code, module_name)
-
-    return code
-
-def _qualify_imports(code, *module_names):
-    pip_import('libcst')
-
-    import libcst as cst
-    from libcst import matchers as m
-
-    class QualifyImportsTransformer(cst.CSTTransformer):
-        def __init__(self, module_names):
-            self.module_names = set(module_names)
-            self.replacements = {}
-
-        def get_full_module_name(self, module):
-            parts = []
-            while isinstance(module, cst.Attribute):
-                parts.insert(0, module.attr.value)
-                module = module.value
-            if isinstance(module, cst.Name):
-                parts.insert(0, module.value)
-            return '.'.join(parts)
-
-        def leave_ImportFrom(self, original_node, updated_node):
-            if original_node.module:
-                mod_name = self.get_full_module_name(original_node.module)
-                if mod_name in self.module_names:
-                    for alias in original_node.names:
-                        if isinstance(alias, cst.ImportAlias) and alias.asname is None:
-                            name = alias.name.value
-                            self.replacements[name] = mod_name
-                    return cst.Import(names=[cst.ImportAlias(name=original_node.module)])
-            return updated_node
-
-        def leave_Name(self, original_node, updated_node):
-            if original_node.value in self.replacements:
-                mod_name = self.replacements[original_node.value]
-                attrs = mod_name.split('.') + [original_node.value]
-                attr_node = cst.Name(attrs[0])
-                for attr in attrs[1:]:
-                    attr_node = cst.Attribute(value=attr_node, attr=cst.Name(attr))
-                return attr_node
-            return updated_node
-
-    tree = cst.parse_module(code)
-    transformer = QualifyImportsTransformer(module_names)
-    modified_tree = tree.visit(transformer)
-
-    return modified_tree.code
-
-def get_star_modules(code):
-    '''
-    EXAMPLE:
-        >>> get_star_modules("""from numpy import randn
-        from rp import *
-        from pandas import *
-        import torch as t
-        """)
-        ans = ['pandas', 'rp']
-    '''
-    code=code.splitlines()
-    code=[x for x in code if x.startswith('from ') and x.endswith('import *')]
-    code=[x[len('from '):-len(' import *')].strip() for x in code]
-    return sorted(set(code))
-
-def refactor_fstrings(code):
-    """
-    Removes f-strings, using str.format notation instead. This is good for making code backwards-compatiable with python 3.5
-    """
-    from rp.libs.refactor.string_format.fstring_converter import convert_string
-    return convert_string(code)
+        
+#def file_line_iterator(file_name):
+#    #Opens a file and iterates through its lines
+#    #Needs a better name
+#    file=open(file_name)
+#    while True:
+#        line=file.readline()
+#        if not line:
+#            return
+#        #I DONT KNOW WHY THIS ASSERTION DOESN'T ALWAYS WORK BUT SOMETIMES IT FAILS...
+#        if line.endswith('\n'):
+#            yield line[:-1]
+#        else:
+#            yield line
 
 def file_line_iterator(file_name, *, with_len=False):
     """
@@ -48646,9 +47531,6 @@ class IteratorWithLen:
 
     def __len__(self):
         return self._length
-
-    def __repr__(self):
-        return '<IteratorWithLen len='+str(self._length)+'>'
     
 @memoized
 def get_system_fonts(filetypes="ttf ttc otf"):

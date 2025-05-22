@@ -2198,7 +2198,7 @@ def handle_character(buffer,char,event=None):
             return True
 
         if not after and char==' ' and before.replace('_','').isalpha():
-            autocaps = 'cdm cd py pym apy apym acat cat vim tab fd fda fdt rn run ccat ncat pip take mkdir cdu lss lsr'.split()
+            autocaps = 'cd py pym apy apym acat cat vim tab fd fda fdt rn run ccat ncat pip take mkdir cdu lss lsr'.split()
 
             import rp
             shortcuts = {c:'!'+c for c in rp.r._get_cached_system_commands()}
@@ -2262,7 +2262,6 @@ def handle_character(buffer,char,event=None):
                 'mmi':'!micromamba install',
 
                 'hd':'CDH',
-                'dm':'CDM',
                 'b':'CDH',
                 'inm':'if __name__ == "__main__":',
 
@@ -2818,7 +2817,6 @@ def load_python_bindings(python_input):
                                              }
                         header_commands={
                                          '\\sim':'sort_imports',
-                                         '\\cim':'clean_imports',
                                          '\\rms':'remove_star',
                                          '\\bla':'black',
                                          '\\gpt':'gpt',
@@ -2898,7 +2896,6 @@ def load_python_bindings(python_input):
                                          '\\diph':'diff_pt_history',
                                          '\\qph':'query_pt_history',
                                          '\\irp':'inline_rp',
-                                         '\\qrp':'qualify_rp',
                                          '\\inm':'if_name_main',
                                          }
                         # header_commands.update(header_jump_commands)
@@ -3220,18 +3217,6 @@ def load_python_bindings(python_input):
                                         text='#inline_rp ERROR'
                                     # replace_buffer_text(buffer, text)
                                     replace_buffer_text(buffer, text)
-                                if header=='qualify_rp':
-                                    text=buffer.document.text
-                                    try:
-                                        import rp
-                                        text='import rp\nfrom rp import *\n'+text
-                                        text=rp.run_removestar(text,qualify=False)
-                                        text=rp.qualify_imports(text,'rp')
-                                        text=text[len('import rp\n'):]
-                                    except Exception as e:
-                                        text='#qualify_rp ERROR: '+str(e)
-                                    # replace_buffer_text(buffer, text)
-                                    replace_buffer_text(buffer, text)
                                 if header=='if_name_main':
                                     buffer.insert_text('if __name__ == "__main__":\n    ')
                                 if header=='repr':
@@ -3255,17 +3240,10 @@ def load_python_bindings(python_input):
                                     try:
                                         text=buffer.document.text
                                         text=rp.r._sort_imports_via_isort(text)
+                                        # buffer.document=Document((text),min(len(text),buffer.document.cursor_position),buffer.document.selection)
                                         replace_buffer_text(buffer, text)
                                     except BaseException as e:
                                         buffer.insert_text('#sort_imports: Error: '+str(e).replace('\n',' ; '))
-                                if header=='clean_imports':
-                                    import rp
-                                    try:
-                                        text=buffer.document.text
-                                        text=rp.r.clean_imports_via_unimport(text)
-                                        replace_buffer_text(buffer, text)
-                                    except BaseException as e:
-                                        buffer.insert_text('#clean_imports: Error: '+str(e).replace('\n',' ; '))
                                 if header=='remove_star':
                                     try:
                                         from rp.r import _removestar
